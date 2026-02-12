@@ -1,0 +1,15 @@
+{
+  "name": "creative-dev-partner",
+  "version": "1.0.0",
+  "description": "AI-powered creative ideation tool",
+  "type": "module",
+  "scripts": {
+    "check": "node check-setup.js",
+    "install-all": "cd backend && npm install && cd ../frontend && npm install",
+    "dev": "echo 'Please run backend and frontend in separate terminals:' && echo '  Terminal 1: cd backend && npm run dev' && echo '  Terminal 2: cd frontend && npm run dev'",
+    "setup": "cp .env.example backend/.env && npm run install-all && echo 'Setup complete! Edit backend/.env with your API key, then run: npm run check'"
+  },
+  "keywords": ["creative", "ai", "advertising", "ideation"],
+  "author": "Elizabeth Strickler",
+  "license": "MIT"
+}

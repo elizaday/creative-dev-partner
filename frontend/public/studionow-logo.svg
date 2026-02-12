@@ -1,0 +1,16 @@
+<svg width="1600" height="240" viewBox="0 0 1600 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Studio (white) -->
+  <text x="0" y="200" font-family="Inter, Arial, sans-serif" font-size="220" font-weight="700" fill="#FFFFFF" letter-spacing="-8">Studio</text>
+
+  <!-- N (white) -->
+  <text x="850" y="200" font-family="Inter, Arial, sans-serif" font-size="220" font-weight="700" fill="#FFFFFF" letter-spacing="-8">N</text>
+
+  <!-- o (blue) -->
+  <text x="1060" y="200" font-family="Inter, Arial, sans-serif" font-size="220" font-weight="700" fill="#0075FF" letter-spacing="-8">o</text>
+
+  <!-- w (white) -->
+  <text x="1240" y="200" font-family="Inter, Arial, sans-serif" font-size="220" font-weight="700" fill="#FFFFFF" letter-spacing="-8">w</text>
+
+  <!-- Blue dot -->
+  <circle cx="1540" cy="170" r="30" fill="#0075FF"/>
+</svg>
