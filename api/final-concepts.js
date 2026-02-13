@@ -137,14 +137,14 @@ Return ONLY the JSON array, no other text.`;
 
     let concepts = JSON.parse(jsonMatch[0]);
 
-    // Generate storyboard images
+    // Set imageUrl to null for all frames — image generation is too slow
+    // for serverless function timeouts. Storyboard text is still included.
     for (const concept of concepts) {
       if (concept.storyboardFrames?.length > 0) {
-        const brandContext = `${concept.title}. ${concept.description}`;
-        concept.storyboardFrames = await generateStoryboardFrames(
-          concept.storyboardFrames,
-          brandContext
-        );
+        concept.storyboardFrames = concept.storyboardFrames.map(frame => ({
+          ...frame,
+          imageUrl: null
+        }));
       }
     }
 

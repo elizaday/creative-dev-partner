@@ -32,6 +32,20 @@ function App() {
     return '';
   };
 
+  // Helper to safely parse JSON from API responses
+  const parseResponse = async (response, fallbackError) => {
+    const text = await response.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Response wasn't JSON (e.g. Vercel timeout page)
+      if (response.status === 504) {
+        throw new Error('Request timed out. Please try again with fewer selections.');
+      }
+      throw new Error(fallbackError);
+    }
+  };
+
   const handleGenerateIdeas = async (briefText) => {
     setBrief(briefText);
     setLoading(true);
@@ -45,12 +59,9 @@ function App() {
         body: JSON.stringify({ brief: briefText })
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to generate ideas');
-      }
+      const data = await parseResponse(response, 'Failed to generate ideas. Please try again.');
+      if (!response.ok) throw new Error(data.error || 'Failed to generate ideas');
 
-      const data = await response.json();
       setIdeas(data.ideas);
       setPhase(2);
     } catch (err) {
@@ -75,12 +86,9 @@ function App() {
         body: JSON.stringify({ brief, selectedIdeas: selectedIdeaObjects })
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to generate variations');
-      }
+      const data = await parseResponse(response, 'Failed to generate variations. Please try again.');
+      if (!response.ok) throw new Error(data.error || 'Failed to generate variations');
 
-      const data = await response.json();
       setVariations(data.variations);
       setPhase(3);
     } catch (err) {
@@ -103,12 +111,9 @@ function App() {
         body: JSON.stringify({ brief, selectedVariations })
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to develop final concepts');
-      }
+      const data = await parseResponse(response, 'Failed to develop final concepts. Please try again.');
+      if (!response.ok) throw new Error(data.error || 'Failed to develop final concepts');
 
-      const data = await response.json();
       setFinalConcepts(data.concepts);
       setPhase(4);
     } catch (err) {
