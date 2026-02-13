@@ -1,21 +1,16 @@
 import Anthropic from '@anthropic-ai/sdk';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
-
 const MODEL = 'claude-sonnet-4-20250514';
 
-const FAL_API_KEY = process.env.FAL_API_KEY;
-
 async function generateImage(prompt) {
-  if (!FAL_API_KEY) return null;
+  const falKey = process.env.FAL_API_KEY;
+  if (!falKey) return null;
 
   try {
     const response = await fetch('https://fal.run/fal-ai/flux/schnell', {
       method: 'POST',
       headers: {
-        'Authorization': `Key ${FAL_API_KEY}`,
+        'Authorization': `Key ${falKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -37,7 +32,8 @@ async function generateImage(prompt) {
 }
 
 async function generateStoryboardFrames(frames, brandContext) {
-  if (!FAL_API_KEY) {
+  const falKey = process.env.FAL_API_KEY;
+  if (!falKey) {
     return frames.map(frame => ({ ...frame, imageUrl: null }));
   }
 
@@ -56,6 +52,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured in Vercel environment variables' });
+    }
+
+    const anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+
     const { brief, selectedVariations } = req.body;
 
     if (!brief || !selectedVariations || selectedVariations.length === 0) {

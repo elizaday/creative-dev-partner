@@ -1,9 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
-
 const MODEL = 'claude-sonnet-4-20250514';
 
 export default async function handler(req, res) {
@@ -12,6 +8,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured in Vercel environment variables' });
+    }
+
+    const anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+
     const { brief, concept, feedback } = req.body;
 
     if (!brief || !concept || !feedback) {
