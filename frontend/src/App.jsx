@@ -32,42 +32,17 @@ function App() {
     return '';
   };
 
-  // Helper to read streamed SSE response and extract final data
-  const fetchStream = async (url, body, fallbackError) => {
+  // Helper to call API and parse JSON response
+  const callApi = async (url, body) => {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
 
-    // Non-streaming error responses (validation errors return JSON directly)
-    const contentType = response.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
-      return data;
-    }
-
-    // Read the SSE stream
-    const text = await response.text();
-    const lines = text.split('\n');
-
-    // Find the last data line that has actual content (not just status)
-    let result = null;
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try {
-          const parsed = JSON.parse(line.slice(6));
-          if (parsed.error) throw new Error(parsed.error);
-          if (!parsed.status) result = parsed; // Skip keepalive status messages
-        } catch (e) {
-          if (e.message && !e.message.includes('JSON')) throw e;
-        }
-      }
-    }
-
-    if (!result) throw new Error(fallbackError);
-    return result;
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+    return data;
   };
 
   const handleGenerateIdeas = async (briefText) => {
@@ -77,7 +52,7 @@ function App() {
     setError(null);
 
     try {
-      const data = await fetchStream('/api/ideas', { brief: briefText }, 'Failed to generate ideas. Please try again.');
+      const data = await callApi('/api/ideas', { brief: briefText });
       setIdeas(data.ideas);
       setPhase(2);
     } catch (err) {
@@ -96,7 +71,7 @@ function App() {
     setError(null);
 
     try {
-      const data = await fetchStream('/api/variations', { brief, selectedIdeas: selectedIdeaObjects }, 'Failed to generate variations. Please try again.');
+      const data = await callApi('/api/variations', { brief, selectedIdeas: selectedIdeaObjects });
       setVariations(data.variations);
       setPhase(3);
     } catch (err) {
@@ -113,7 +88,7 @@ function App() {
     setError(null);
 
     try {
-      const data = await fetchStream('/api/final-concepts', { brief, selectedVariations }, 'Failed to develop final concepts. Please try again.');
+      const data = await callApi('/api/final-concepts', { brief, selectedVariations });
       setFinalConcepts(data.concepts);
       setPhase(4);
     } catch (err) {
