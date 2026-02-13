@@ -2,50 +2,6 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-sonnet-4-20250514';
 
-async function generateImage(prompt) {
-  const falKey = process.env.FAL_API_KEY;
-  if (!falKey) return null;
-
-  try {
-    const response = await fetch('https://fal.run/fal-ai/flux/schnell', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Key ${falKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        prompt,
-        image_size: 'landscape_16_9',
-        num_inference_steps: 4,
-        num_images: 1,
-        enable_safety_checker: false,
-      }),
-    });
-
-    if (!response.ok) return null;
-
-    const result = await response.json();
-    return result.images?.[0]?.url || null;
-  } catch {
-    return null;
-  }
-}
-
-async function generateStoryboardFrames(frames, brandContext) {
-  const falKey = process.env.FAL_API_KEY;
-  if (!falKey) {
-    return frames.map(frame => ({ ...frame, imageUrl: null }));
-  }
-
-  const imagePromises = frames.map(async (frame) => {
-    const prompt = `Professional commercial advertisement frame, ${frame.shotType} shot. ${frame.visual}. ${frame.action}. ${brandContext}. Cinematic lighting, high-end commercial photography, professional production quality, 16:9 aspect ratio, advertising style.`;
-    const imageUrl = await generateImage(prompt);
-    return { ...frame, imageUrl };
-  });
-
-  return Promise.all(imagePromises);
-}
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -123,22 +79,37 @@ Format as JSON array:
 
 Return ONLY the JSON array, no other text.`;
 
-    const message = await anthropic.messages.create({
+    // Use streaming to avoid Vercel's 10s timeout on Hobby plan
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    let fullText = '';
+
+    const stream = anthropic.messages.stream({
       model: MODEL,
       max_tokens: 16000,
       messages: [{ role: 'user', content: prompt }],
     });
 
-    const response_text = message.content[0].text;
-    const jsonMatch = response_text.match(/\[[\s\S]*\]/);
+    stream.on('text', (text) => {
+      fullText += text;
+      res.write(`data: {"status":"generating"}\n\n`);
+    });
+
+    const finalMessage = await stream.finalMessage();
+    fullText = finalMessage.content[0].text;
+
+    const jsonMatch = fullText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      throw new Error('Failed to parse final concepts from Claude response');
+      res.write(`data: {"error":"Failed to parse final concepts from Claude response"}\n\n`);
+      res.end();
+      return;
     }
 
     let concepts = JSON.parse(jsonMatch[0]);
 
-    // Set imageUrl to null for all frames — image generation is too slow
-    // for serverless function timeouts. Storyboard text is still included.
+    // Set imageUrl to null — image generation is separate from this endpoint
     for (const concept of concepts) {
       if (concept.storyboardFrames?.length > 0) {
         concept.storyboardFrames = concept.storyboardFrames.map(frame => ({
@@ -148,9 +119,11 @@ Return ONLY the JSON array, no other text.`;
       }
     }
 
-    res.status(200).json({ concepts });
+    res.write(`data: ${JSON.stringify({ concepts })}\n\n`);
+    res.end();
   } catch (error) {
     console.error('Error developing final concepts:', error);
-    res.status(500).json({ error: 'Failed to develop final concepts', details: error.message });
+    res.write(`data: ${JSON.stringify({ error: 'Failed to develop final concepts', details: error.message })}\n\n`);
+    res.end();
   }
 }

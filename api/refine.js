@@ -38,22 +38,40 @@ Revise the concept to address the feedback while maintaining what works. Return 
 
 Return ONLY the JSON object, no other text.`;
 
-    const message = await anthropic.messages.create({
+    // Use streaming to avoid Vercel's 10s timeout on Hobby plan
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    let fullText = '';
+
+    const stream = anthropic.messages.stream({
       model: MODEL,
       max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }],
     });
 
-    const response_text = message.content[0].text;
-    const jsonMatch = response_text.match(/\{[\s\S]*\}/);
+    stream.on('text', (text) => {
+      fullText += text;
+      res.write(`data: {"status":"generating"}\n\n`);
+    });
+
+    const finalMessage = await stream.finalMessage();
+    fullText = finalMessage.content[0].text;
+
+    const jsonMatch = fullText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      throw new Error('Failed to parse refined concept from Claude response');
+      res.write(`data: {"error":"Failed to parse refined concept from Claude response"}\n\n`);
+      res.end();
+      return;
     }
 
     const refined = JSON.parse(jsonMatch[0]);
-    res.status(200).json({ concept: refined });
+    res.write(`data: ${JSON.stringify({ concept: refined })}\n\n`);
+    res.end();
   } catch (error) {
     console.error('Error refining concept:', error);
-    res.status(500).json({ error: 'Failed to refine concept', details: error.message });
+    res.write(`data: ${JSON.stringify({ error: 'Failed to refine concept', details: error.message })}\n\n`);
+    res.end();
   }
 }

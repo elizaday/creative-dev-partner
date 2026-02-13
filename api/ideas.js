@@ -63,22 +63,41 @@ Format your response as a JSON array. Example structure:
 
 Return ONLY the JSON array, no other text.`;
 
-    const message = await anthropic.messages.create({
+    // Use streaming to avoid Vercel's 10s timeout on Hobby plan
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    let fullText = '';
+
+    const stream = anthropic.messages.stream({
       model: MODEL,
       max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }],
     });
 
-    const response_text = message.content[0].text;
-    const jsonMatch = response_text.match(/\[[\s\S]*\]/);
+    stream.on('text', (text) => {
+      fullText += text;
+      // Send keepalive to prevent timeout
+      res.write(`data: {"status":"generating"}\n\n`);
+    });
+
+    const finalMessage = await stream.finalMessage();
+    fullText = finalMessage.content[0].text;
+
+    const jsonMatch = fullText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      throw new Error('Failed to parse ideas from Claude response');
+      res.write(`data: {"error":"Failed to parse ideas from Claude response"}\n\n`);
+      res.end();
+      return;
     }
 
     const ideas = JSON.parse(jsonMatch[0]);
-    res.status(200).json({ ideas });
+    res.write(`data: ${JSON.stringify({ ideas })}\n\n`);
+    res.end();
   } catch (error) {
     console.error('Error generating ideas:', error);
-    res.status(500).json({ error: 'Failed to generate ideas', details: error.message });
+    res.write(`data: ${JSON.stringify({ error: 'Failed to generate ideas', details: error.message })}\n\n`);
+    res.end();
   }
 }
