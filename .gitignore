@@ -9,6 +9,7 @@ package-lock.json
 # Build output
 frontend/dist/
 frontend/build/
+public/
 
 # Sessions data
 sessions/*.json
