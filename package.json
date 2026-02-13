@@ -9,6 +9,9 @@
     "dev": "echo 'Please run backend and frontend in separate terminals:' && echo '  Terminal 1: cd backend && npm run dev' && echo '  Terminal 2: cd frontend && npm run dev'",
     "setup": "cp .env.example backend/.env && npm run install-all && echo 'Setup complete! Edit backend/.env with your API key, then run: npm run check'"
   },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1"
+  },
   "keywords": ["creative", "ai", "advertising", "ideation"],
   "author": "Elizabeth Strickler",
   "license": "MIT"
