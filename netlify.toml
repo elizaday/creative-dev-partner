@@ -1,5 +1,5 @@
 [build]
-  command = "cd frontend && npm install && npm run build"
+  command = "npm install && cd frontend && npm install && npm run build"
   publish = "frontend/dist"
 
 [functions]
@@ -10,3 +10,4 @@
   from = "/*"
   to = "/index.html"
   status = 200
+  force = false
