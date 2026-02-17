@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = 'claude-3-5-haiku-latest';
 
 export default async (req) => {
   if (req.method !== 'POST') {
@@ -37,7 +37,7 @@ Return ONLY the JSON object, no other text.`;
 
     const message = await anthropic.messages.create({
       model: MODEL,
-      max_tokens: 4000,
+      max_tokens: 1200,
       messages: [{ role: 'user', content: prompt }],
     });
 

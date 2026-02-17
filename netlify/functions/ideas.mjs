@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = 'claude-3-5-haiku-latest';
 
 export default async (req) => {
   if (req.method !== 'POST') {
@@ -19,7 +19,7 @@ export default async (req) => {
       return new Response(JSON.stringify({ error: 'Brief must be at least 50 characters' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
-    const prompt = `You are an expert creative director helping develop advertising concepts. I'll give you a client brief, and you'll generate 10 wildly different creative directions.
+    const prompt = `You are an expert creative director helping develop advertising concepts. Generate 10 creative directions from this brief.
 
 BRIEF:
 ${brief}
@@ -37,32 +37,13 @@ For each concept, provide:
 4. 3 tags: one for tone, one for visual style, one for risk level
 5. 4 scene beats (opening, build, turn, resolution)
 
-Format your response as a JSON array. Example structure:
-[
-  {
-    "id": 1,
-    "title": "The Expert Opinion",
-    "hook": "Experts analyzed it for hours. Their conclusion? It just works.",
-    "description": "A panel of overly serious experts examine the product with absurd intensity. Charts, graphs, heated debates. Final verdict: no notes.",
-    "tags": {
-      "tone": "Satirical",
-      "visual": "Institutional",
-      "risk": "Safe"
-    },
-    "scenes": [
-      "Opening: Panel of experts gather around product",
-      "Build: Intense analysis, furrowed brows, heated whispers",
-      "Turn: Head expert delivers verdict with gravitas",
-      "Resolution: 'No notes.' Simple satisfaction."
-    ]
-  }
-]
-
-Return ONLY the JSON array, no other text.`;
+Format as JSON array with objects containing:
+id, title, hook, description, tags { tone, visual, risk }, scenes (4 items).
+Return ONLY JSON.`;
 
     const message = await anthropic.messages.create({
       model: MODEL,
-      max_tokens: 8000,
+      max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     });
 
