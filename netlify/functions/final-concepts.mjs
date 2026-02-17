@@ -2,6 +2,16 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-3-5-haiku-latest';
 const ANTHROPIC_TIMEOUT_MS = 12000;
+const TIMEOUT_ERROR = 'ANTHROPIC_TIMEOUT';
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(TIMEOUT_ERROR)), ms);
+    })
+  ]);
+}
 
 function buildFallbackConcept(variation, index) {
   return {
@@ -142,19 +152,18 @@ export default async (req) => {
 
     const prompt = `You are an expert creative director.\n\nORIGINAL BRIEF:\n${brief}\n\nSELECTED VARIATIONS:\n${variationsText}\n\nGenerate EXACTLY ${expectedCount} final concepts as a JSON array with EXACTLY ${expectedCount} objects.\nEach object must include: number, title, tagline, description, storyboardFrames (exactly 4 with frameNumber/timing/shotType/visual/action/audio/transition), visualReferences, productionNotes, rationale.\nReturn ONLY valid JSON. Keep output concise.`;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), ANTHROPIC_TIMEOUT_MS);
-
     let message;
     try {
-      message = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: 1600,
-        messages: [{ role: 'user', content: prompt }],
-        signal: controller.signal
-      });
+      message = await withTimeout(
+        anthropic.messages.create({
+          model: MODEL,
+          max_tokens: 1600,
+          messages: [{ role: 'user', content: prompt }]
+        }),
+        ANTHROPIC_TIMEOUT_MS
+      );
     } catch (error) {
-      if (error.name === 'AbortError') {
+      if (error.message === TIMEOUT_ERROR) {
         const concepts = fallbackConceptsFromVariations(selectedVariations);
         return new Response(JSON.stringify({ concepts, fallback: true, partial: true }), {
           status: 200,
@@ -162,8 +171,6 @@ export default async (req) => {
         });
       }
       throw error;
-    } finally {
-      clearTimeout(timeout);
     }
 
     const responseText = message.content[0].text;

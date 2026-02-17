@@ -2,6 +2,16 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-3-5-haiku-latest';
 const ANTHROPIC_TIMEOUT_MS = 12000;
+const TIMEOUT_ERROR = 'ANTHROPIC_TIMEOUT';
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(TIMEOUT_ERROR)), ms);
+    })
+  ]);
+}
 
 function buildFallbackIdeas() {
   const templates = [
@@ -75,27 +85,24 @@ Format as JSON array with objects containing:
 id, title, hook, description, tags { tone, visual, risk }, scenes (4 items).
 Return ONLY JSON.`;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), ANTHROPIC_TIMEOUT_MS);
-
     let message;
     try {
-      message = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: 1200,
-        messages: [{ role: 'user', content: prompt }],
-        signal: controller.signal
-      });
+      message = await withTimeout(
+        anthropic.messages.create({
+          model: MODEL,
+          max_tokens: 1200,
+          messages: [{ role: 'user', content: prompt }]
+        }),
+        ANTHROPIC_TIMEOUT_MS
+      );
     } catch (error) {
-      if (error.name === 'AbortError') {
+      if (error.message === TIMEOUT_ERROR) {
         return new Response(JSON.stringify({ ideas: buildFallbackIdeas(), fallback: true, partial: true }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
       }
       throw error;
-    } finally {
-      clearTimeout(timeout);
     }
 
     const responseText = message.content[0].text;
