@@ -1,168 +1,130 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-3-5-haiku-latest';
-const FAL_ENDPOINT = 'https://fal.run/fal-ai/flux/schnell';
-const MAX_IMAGE_FRAMES = 1;
-const IMAGE_BUDGET_MS = 8000;
 
-async function generateFrameImage(frame, brandContext) {
-  const falKey = process.env.FAL_API_KEY;
-  if (!falKey) return null;
+function buildFallbackConcept(variation, index) {
+  return {
+    number: index + 1,
+    title: variation?.title || `Concept ${index + 1}`,
+    tagline: variation?.shift || 'Refined from selected variation',
+    description: variation?.description || 'Concept draft generated from selected variation.',
+    storyboardFrames: [],
+    visualReferences: [],
+    productionNotes: [],
+    rationale: 'Generated as a fallback because the model returned fewer concepts than requested.'
+  };
+}
 
-  const prompt = [
-    `Professional commercial advertisement frame, ${frame.shotType || 'wide'} shot.`,
-    frame.visual || '',
-    frame.action || '',
-    brandContext || '',
-    'Cinematic lighting, high-end commercial photography, 16:9 aspect ratio.'
-  ].join(' ');
+function normalizeConcepts(rawConcepts, selectedVariations) {
+  const expectedCount = selectedVariations.length;
+  const concepts = Array.isArray(rawConcepts) ? rawConcepts.slice(0, expectedCount) : [];
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-
-  try {
-    const response = await fetch(FAL_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        Authorization: `Key ${falKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        prompt,
-        image_size: 'landscape_16_9',
-        num_inference_steps: 4,
-        num_images: 1,
-        enable_safety_checker: false
-      }),
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`FAL image generation failed (${response.status}):`, errText);
-      return null;
-    }
-
-    const result = await response.json();
-    return result?.images?.[0]?.url || null;
-  } catch (error) {
-    console.error('FAL image generation error:', error.message);
-    return null;
-  } finally {
-    clearTimeout(timeout);
+  for (let i = 0; i < concepts.length; i += 1) {
+    const concept = concepts[i] || {};
+    const frames = Array.isArray(concept.storyboardFrames) ? concept.storyboardFrames : [];
+    concept.number = concept.number || i + 1;
+    concept.title = concept.title || selectedVariations[i]?.title || `Concept ${i + 1}`;
+    concept.tagline = concept.tagline || selectedVariations[i]?.shift || '';
+    concept.description = concept.description || selectedVariations[i]?.description || '';
+    concept.visualReferences = Array.isArray(concept.visualReferences) ? concept.visualReferences : [];
+    concept.productionNotes = Array.isArray(concept.productionNotes) ? concept.productionNotes : [];
+    concept.storyboardFrames = frames.map((frame, frameIndex) => ({
+      frameNumber: frame.frameNumber || frameIndex + 1,
+      timing: frame.timing || '',
+      shotType: frame.shotType || 'Wide',
+      visual: frame.visual || '',
+      action: frame.action || '',
+      audio: frame.audio || '',
+      transition: frame.transition || '',
+      imageUrl: frame.imageUrl || null
+    }));
   }
+
+  while (concepts.length < expectedCount) {
+    concepts.push(buildFallbackConcept(selectedVariations[concepts.length], concepts.length));
+  }
+
+  return concepts;
 }
 
 export default async (req) => {
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+      status: 405,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 
   try {
     if (!process.env.ANTHROPIC_API_KEY) {
-      return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY is not configured' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY is not configured' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const { brief, selectedVariations } = await req.json();
 
     if (!brief || !selectedVariations || selectedVariations.length === 0) {
-      return new Response(JSON.stringify({ error: 'Brief and selected variations are required' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ error: 'Brief and selected variations are required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
     if (selectedVariations.length > 3) {
-      return new Response(JSON.stringify({ error: 'Maximum 3 variations can be selected' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ error: 'Maximum 3 variations can be selected' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
-    const variationsText = selectedVariations.map(v =>
-      `${v.title}\n${v.description}\nShift: ${v.shift}`
-    ).join('\n\n---\n\n');
+    const expectedCount = selectedVariations.length;
+    const variationsText = selectedVariations
+      .map((v, idx) => `Variation ${idx + 1}: ${v.title}\n${v.description}\nShift: ${v.shift}`)
+      .join('\n\n---\n\n');
 
-    const prompt = `You are an expert creative director developing final presentation-ready concepts with detailed storyboard frames.
-
-ORIGINAL BRIEF:
-${brief}
-
-SELECTED VARIATIONS:
-${variationsText}
-
-For each variation above, create a fully developed creative concept suitable for client presentation. Include:
-
-1. Polished title and tagline
-2. Expanded concept description (4-5 sentences)
-3. STORYBOARD FRAMES (4-5 frames for a 30-second spot) - Each frame must include:
-   - Frame number and timing (e.g., "Frame 1 (0:00-0:04)")
-   - Shot type (Wide, Medium, Close-up, Extreme Close-up, Over-shoulder, POV, etc.)
-   - Visual description (What we see - be specific about composition, lighting, subjects)
-   - Action/Movement (What's happening in the frame)
-   - Audio (Dialogue, sound effects, or music cues)
-   - Transition (Cut, Fade, Dissolve, etc.)
-4. Visual references description (describe 4 reference types/moods)
-5. Production notes (tone, format, key considerations)
-6. Rationale (why this works for the brief)
-
-Format as JSON array:
-[
-  {
-    "number": 1,
-    "title": "The Expert Opinion",
-    "tagline": "Experts analyzed it for hours. Their conclusion? It just works.",
-    "description": "Full concept description here...",
-    "storyboardFrames": [
-      {
-        "frameNumber": 1,
-        "timing": "0:00-0:04",
-        "shotType": "Wide",
-        "visual": "Description of what we see",
-        "action": "What is happening",
-        "audio": "What we hear",
-        "transition": "Cut"
-      }
-    ],
-    "visualReferences": ["ref1", "ref2", "ref3", "ref4"],
-    "productionNotes": ["note1", "note2"],
-    "rationale": "Why this works..."
-  }
-]
-
-Return ONLY the JSON array, no other text.`;
+    const prompt = `You are an expert creative director.\n\nORIGINAL BRIEF:\n${brief}\n\nSELECTED VARIATIONS:\n${variationsText}\n\nGenerate EXACTLY ${expectedCount} final concepts as a JSON array with EXACTLY ${expectedCount} objects.\nEach object must include:\n- number\n- title\n- tagline\n- description (3-4 sentences)\n- storyboardFrames (exactly 4 frames)\n  - frameNumber\n  - timing\n  - shotType\n  - visual\n  - action\n  - audio\n  - transition\n- visualReferences (3-4 bullets)\n- productionNotes (3-4 bullets)\n- rationale (2-3 sentences)\n\nReturn ONLY valid JSON.`;
 
     const message = await anthropic.messages.create({
       model: MODEL,
-      max_tokens: 3200,
-      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 2600,
+      messages: [{ role: 'user', content: prompt }]
     });
 
     const responseText = message.content[0].text;
     const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      return new Response(JSON.stringify({ error: 'Failed to parse final concepts from Claude response' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ error: 'Failed to parse final concepts from Claude response' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
-    let concepts = JSON.parse(jsonMatch[0]);
-
-    // Attempt image generation for a very small subset of frames to stay within serverless limits.
-    for (const concept of concepts) {
-      if (concept.storyboardFrames?.length > 0) {
-        const brandContext = `${concept.title || ''}. ${concept.description || ''}`.trim();
-        const imageBudgetDeadline = Date.now() + IMAGE_BUDGET_MS;
-        concept.storyboardFrames = await Promise.all(
-          concept.storyboardFrames.map(async (frame, idx) => {
-            if (idx >= MAX_IMAGE_FRAMES || Date.now() > imageBudgetDeadline) {
-              return { ...frame, imageUrl: null };
-            }
-            const imageUrl = await generateFrameImage(frame, brandContext);
-            return { ...frame, imageUrl };
-          })
-        );
-      }
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch (error) {
+      return new Response(JSON.stringify({ error: 'Failed to parse final concepts JSON', details: error.message }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
-    return new Response(JSON.stringify({ concepts }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const concepts = normalizeConcepts(parsed, selectedVariations);
+
+    return new Response(JSON.stringify({ concepts }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
   } catch (error) {
     console.error('Error developing final concepts:', error);
-    return new Response(JSON.stringify({ error: 'Failed to develop final concepts', details: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: 'Failed to develop final concepts', details: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 };
 
-export const config = { path: "/api/final-concepts" };
+export const config = { path: '/api/final-concepts' };
