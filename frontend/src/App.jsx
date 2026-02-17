@@ -119,7 +119,7 @@ function App() {
           <div className="logo-area">
             <img src="/studionow-logo-white.svg" alt="StudioNow" className="logo-image" />
             <div className="logo-divider"></div>
-            <div className="tool-name">Creative Dev Partner</div>
+            <div className="tool-name">Creative Development Partner</div>
           </div>
           <div className="phase-indicator">
             {phases.map((p, idx) => (
