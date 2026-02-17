@@ -1,6 +1,56 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-3-5-haiku-latest';
+const FAL_ENDPOINT = 'https://fal.run/fal-ai/flux/schnell';
+const MAX_IMAGE_FRAMES = 4;
+
+async function generateFrameImage(frame, brandContext) {
+  const falKey = process.env.FAL_API_KEY;
+  if (!falKey) return null;
+
+  const prompt = [
+    `Professional commercial advertisement frame, ${frame.shotType || 'wide'} shot.`,
+    frame.visual || '',
+    frame.action || '',
+    brandContext || '',
+    'Cinematic lighting, high-end commercial photography, 16:9 aspect ratio.'
+  ].join(' ');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const response = await fetch(FAL_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        Authorization: `Key ${falKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompt,
+        image_size: 'landscape_16_9',
+        num_inference_steps: 4,
+        num_images: 1,
+        enable_safety_checker: false
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`FAL image generation failed (${response.status}):`, errText);
+      return null;
+    }
+
+    const result = await response.json();
+    return result?.images?.[0]?.url || null;
+  } catch (error) {
+    console.error('FAL image generation error:', error.message);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 export default async (req) => {
   if (req.method !== 'POST') {
@@ -39,7 +89,7 @@ For each variation above, create a fully developed creative concept suitable for
 
 1. Polished title and tagline
 2. Expanded concept description (4-5 sentences)
-3. STORYBOARD FRAMES (5-8 frames for a 30-second spot) - Each frame must include:
+3. STORYBOARD FRAMES (4-5 frames for a 30-second spot) - Each frame must include:
    - Frame number and timing (e.g., "Frame 1 (0:00-0:04)")
    - Shot type (Wide, Medium, Close-up, Extreme Close-up, Over-shoulder, POV, etc.)
    - Visual description (What we see - be specific about composition, lighting, subjects)
@@ -90,13 +140,19 @@ Return ONLY the JSON array, no other text.`;
 
     let concepts = JSON.parse(jsonMatch[0]);
 
-    // Set imageUrl to null for all frames (no image generation in serverless)
+    // Attempt image generation for a subset of frames to stay within serverless limits.
     for (const concept of concepts) {
       if (concept.storyboardFrames?.length > 0) {
-        concept.storyboardFrames = concept.storyboardFrames.map(frame => ({
-          ...frame,
-          imageUrl: null
-        }));
+        const brandContext = `${concept.title || ''}. ${concept.description || ''}`.trim();
+        concept.storyboardFrames = await Promise.all(
+          concept.storyboardFrames.map(async (frame, idx) => {
+            if (idx >= MAX_IMAGE_FRAMES) {
+              return { ...frame, imageUrl: null };
+            }
+            const imageUrl = await generateFrameImage(frame, brandContext);
+            return { ...frame, imageUrl };
+          })
+        );
       }
     }
 
