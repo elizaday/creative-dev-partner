@@ -2,7 +2,8 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-3-5-haiku-latest';
 const FAL_ENDPOINT = 'https://fal.run/fal-ai/flux/schnell';
-const MAX_IMAGE_FRAMES = 4;
+const MAX_IMAGE_FRAMES = 1;
+const IMAGE_BUDGET_MS = 8000;
 
 async function generateFrameImage(frame, brandContext) {
   const falKey = process.env.FAL_API_KEY;
@@ -140,13 +141,14 @@ Return ONLY the JSON array, no other text.`;
 
     let concepts = JSON.parse(jsonMatch[0]);
 
-    // Attempt image generation for a subset of frames to stay within serverless limits.
+    // Attempt image generation for a very small subset of frames to stay within serverless limits.
     for (const concept of concepts) {
       if (concept.storyboardFrames?.length > 0) {
         const brandContext = `${concept.title || ''}. ${concept.description || ''}`.trim();
+        const imageBudgetDeadline = Date.now() + IMAGE_BUDGET_MS;
         concept.storyboardFrames = await Promise.all(
           concept.storyboardFrames.map(async (frame, idx) => {
-            if (idx >= MAX_IMAGE_FRAMES) {
+            if (idx >= MAX_IMAGE_FRAMES || Date.now() > imageBudgetDeadline) {
               return { ...frame, imageUrl: null };
             }
             const imageUrl = await generateFrameImage(frame, brandContext);
