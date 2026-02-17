@@ -34,7 +34,11 @@ async function imageToDataUrl(url) {
     canvas.height = img.height;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0);
-    return canvas.toDataURL('image/jpeg', 0.9);
+    return {
+      dataUrl: canvas.toDataURL('image/jpeg', 0.9),
+      width: img.width,
+      height: img.height
+    };
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
@@ -85,9 +89,22 @@ export async function exportConceptPdf(concept, conceptNumber) {
     if (frame.imageUrl) {
       try {
         const imageData = await imageToDataUrl(frame.imageUrl);
-        const imageWidth = contentWidth;
-        const imageHeight = Math.min(220, (imageWidth * 9) / 16);
-        doc.addImage(imageData, 'JPEG', margin, y, imageWidth, imageHeight);
+        const maxImageWidth = contentWidth;
+        const maxImageHeight = 240;
+        const scale = Math.min(
+          maxImageWidth / imageData.width,
+          maxImageHeight / imageData.height
+        );
+        const imageWidth = imageData.width * scale;
+        const imageHeight = imageData.height * scale;
+
+        if (y + imageHeight > pageHeight - margin) {
+          doc.addPage();
+          y = margin;
+        }
+
+        const imageX = margin + (contentWidth - imageWidth) / 2;
+        doc.addImage(imageData.dataUrl, 'JPEG', imageX, y, imageWidth, imageHeight);
         y += imageHeight + 10;
       } catch (error) {
         doc.setFont('helvetica', 'normal');

@@ -3,6 +3,17 @@ import Anthropic from '@anthropic-ai/sdk';
 const MODEL = 'claude-3-5-haiku-latest';
 const ANTHROPIC_TIMEOUT_MS = 12000;
 const TIMEOUT_ERROR = 'ANTHROPIC_TIMEOUT';
+const TARGET_FRAME_COUNT = 8;
+const FRAME_TIMINGS = [
+  '0:00-0:04',
+  '0:04-0:08',
+  '0:08-0:12',
+  '0:12-0:16',
+  '0:16-0:20',
+  '0:20-0:24',
+  '0:24-0:27',
+  '0:27-0:30'
+];
 
 function withTimeout(promise, ms) {
   return Promise.race([
@@ -13,13 +24,49 @@ function withTimeout(promise, ms) {
   ]);
 }
 
+function buildPlaceholderFrame(frameIndex, seedText = '') {
+  const frameNumber = frameIndex + 1;
+  return {
+    frameNumber,
+    timing: FRAME_TIMINGS[frameIndex] || '',
+    shotType: ['Wide', 'Medium', 'Close-up', 'Wide', 'Medium', 'Close-up', 'POV', 'Hero'][frameIndex] || 'Wide',
+    visual: seedText ? `Visual beat ${frameNumber}: ${seedText}` : `Visual beat ${frameNumber}: clear progression of the concept.`,
+    action: `Action beat ${frameNumber}: advance story toward final payoff.`,
+    audio: `Audio beat ${frameNumber}: supporting VO/music cue.`,
+    transition: frameNumber === TARGET_FRAME_COUNT ? 'Fade out' : 'Cut',
+    imageUrl: null
+  };
+}
+
+function normalizeStoryboardFrames(frames, seedText = '') {
+  const normalized = [];
+  for (let i = 0; i < TARGET_FRAME_COUNT; i += 1) {
+    const frame = Array.isArray(frames) ? frames[i] : null;
+    if (frame) {
+      normalized.push({
+        frameNumber: i + 1,
+        timing: frame.timing || FRAME_TIMINGS[i] || '',
+        shotType: frame.shotType || 'Wide',
+        visual: frame.visual || (seedText ? `Visual beat ${i + 1}: ${seedText}` : ''),
+        action: frame.action || `Action beat ${i + 1}: progress the narrative.`,
+        audio: frame.audio || `Audio beat ${i + 1}: VO/music support.`,
+        transition: frame.transition || (i === TARGET_FRAME_COUNT - 1 ? 'Fade out' : 'Cut'),
+        imageUrl: frame.imageUrl || null
+      });
+    } else {
+      normalized.push(buildPlaceholderFrame(i, seedText));
+    }
+  }
+  return normalized;
+}
+
 function buildFallbackConcept(variation, index) {
   return {
     number: index + 1,
     title: variation?.title || `Concept ${index + 1}`,
     tagline: variation?.shift || 'Refined from selected variation',
     description: variation?.description || 'Concept draft generated from selected variation.',
-    storyboardFrames: [],
+    storyboardFrames: normalizeStoryboardFrames([], variation?.description || variation?.title || ''),
     visualReferences: [],
     productionNotes: [],
     rationale: 'Generated as a fallback because the model returned fewer concepts than requested.'
@@ -39,16 +86,10 @@ function normalizeConcepts(rawConcepts, selectedVariations) {
     concept.description = concept.description || selectedVariations[i]?.description || '';
     concept.visualReferences = Array.isArray(concept.visualReferences) ? concept.visualReferences : [];
     concept.productionNotes = Array.isArray(concept.productionNotes) ? concept.productionNotes : [];
-    concept.storyboardFrames = frames.map((frame, frameIndex) => ({
-      frameNumber: frame.frameNumber || frameIndex + 1,
-      timing: frame.timing || '',
-      shotType: frame.shotType || 'Wide',
-      visual: frame.visual || '',
-      action: frame.action || '',
-      audio: frame.audio || '',
-      transition: frame.transition || '',
-      imageUrl: frame.imageUrl || null
-    }));
+    concept.storyboardFrames = normalizeStoryboardFrames(
+      frames,
+      concept.description || selectedVariations[i]?.description || selectedVariations[i]?.title || ''
+    );
   }
 
   while (concepts.length < expectedCount) {
@@ -64,48 +105,7 @@ function fallbackConceptsFromVariations(selectedVariations) {
     title: variation?.title || `Concept ${index + 1}`,
     tagline: variation?.shift || 'Refined variation',
     description: variation?.description || 'Generated from selected variation.',
-    storyboardFrames: [
-      {
-        frameNumber: 1,
-        timing: '0:00-0:07',
-        shotType: 'Wide',
-        visual: 'Establish the world and product context.',
-        action: 'Open on the core setup.',
-        audio: 'Ambient bed and opening VO.',
-        transition: 'Cut',
-        imageUrl: null
-      },
-      {
-        frameNumber: 2,
-        timing: '0:07-0:15',
-        shotType: 'Medium',
-        visual: 'Show the product interaction in context.',
-        action: 'Demonstrate the main value clearly.',
-        audio: 'VO explains key benefit.',
-        transition: 'Cut',
-        imageUrl: null
-      },
-      {
-        frameNumber: 3,
-        timing: '0:15-0:23',
-        shotType: 'Close-up',
-        visual: 'Highlight details and payoff moment.',
-        action: 'Build proof and differentiation.',
-        audio: 'Music lift and concise line.',
-        transition: 'Cut',
-        imageUrl: null
-      },
-      {
-        frameNumber: 4,
-        timing: '0:23-0:30',
-        shotType: 'Hero',
-        visual: 'Clean product hero with brand lockup.',
-        action: 'Land message and CTA.',
-        audio: 'Tagline VO and resolve.',
-        transition: 'Fade out',
-        imageUrl: null
-      }
-    ],
+    storyboardFrames: normalizeStoryboardFrames([], variation?.description || variation?.title || ''),
     visualReferences: ['High-end commercial look', 'Clear product storytelling', 'Brand-consistent tone'],
     productionNotes: ['30-second pacing', 'Readable visuals', 'Simple transitions'],
     rationale: 'Fallback generated to avoid timeout and keep workflow moving.'
@@ -150,7 +150,7 @@ export default async (req) => {
       .map((v, idx) => `Variation ${idx + 1}: ${v.title}\n${v.description}\nShift: ${v.shift}`)
       .join('\n\n---\n\n');
 
-    const prompt = `You are an expert creative director.\n\nORIGINAL BRIEF:\n${brief}\n\nSELECTED VARIATIONS:\n${variationsText}\n\nGenerate EXACTLY ${expectedCount} final concepts as a JSON array with EXACTLY ${expectedCount} objects.\nEach object must include: number, title, tagline, description, storyboardFrames (exactly 4 with frameNumber/timing/shotType/visual/action/audio/transition), visualReferences, productionNotes, rationale.\nReturn ONLY valid JSON. Keep output concise.`;
+    const prompt = `You are an expert creative director.\n\nORIGINAL BRIEF:\n${brief}\n\nSELECTED VARIATIONS:\n${variationsText}\n\nGenerate EXACTLY ${expectedCount} final concepts as a JSON array with EXACTLY ${expectedCount} objects.\nEach object must include: number, title, tagline, description, storyboardFrames (exactly ${TARGET_FRAME_COUNT} with frameNumber/timing/shotType/visual/action/audio/transition), visualReferences, productionNotes, rationale.\nKeep each frame field concise (1 short sentence). Return ONLY valid JSON.`;
 
     let message;
     try {
