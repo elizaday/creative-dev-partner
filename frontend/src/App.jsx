@@ -40,8 +40,18 @@ function App() {
       body: JSON.stringify(body)
     });
 
+    const contentType = response.headers.get('content-type') || '';
+
+    if (!contentType.includes('application/json')) {
+      const text = await response.text();
+      const snippet = text.slice(0, 160).replace(/\s+/g, ' ').trim();
+      throw new Error(`API returned non-JSON (${response.status}). ${snippet}`);
+    }
+
     const data = await response.json();
-    if (data.error) throw new Error(data.error);
+    if (!response.ok || data.error) {
+      throw new Error(data.details || data.error || `Request failed (${response.status})`);
+    }
     return data;
   };
 
