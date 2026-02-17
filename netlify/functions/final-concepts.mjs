@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = 'claude-3-5-haiku-latest';
+const ANTHROPIC_TIMEOUT_MS = 12000;
 
 function buildFallbackConcept(variation, index) {
   return {
@@ -47,6 +48,60 @@ function normalizeConcepts(rawConcepts, selectedVariations) {
   return concepts;
 }
 
+function fallbackConceptsFromVariations(selectedVariations) {
+  return selectedVariations.map((variation, index) => ({
+    number: index + 1,
+    title: variation?.title || `Concept ${index + 1}`,
+    tagline: variation?.shift || 'Refined variation',
+    description: variation?.description || 'Generated from selected variation.',
+    storyboardFrames: [
+      {
+        frameNumber: 1,
+        timing: '0:00-0:07',
+        shotType: 'Wide',
+        visual: 'Establish the world and product context.',
+        action: 'Open on the core setup.',
+        audio: 'Ambient bed and opening VO.',
+        transition: 'Cut',
+        imageUrl: null
+      },
+      {
+        frameNumber: 2,
+        timing: '0:07-0:15',
+        shotType: 'Medium',
+        visual: 'Show the product interaction in context.',
+        action: 'Demonstrate the main value clearly.',
+        audio: 'VO explains key benefit.',
+        transition: 'Cut',
+        imageUrl: null
+      },
+      {
+        frameNumber: 3,
+        timing: '0:15-0:23',
+        shotType: 'Close-up',
+        visual: 'Highlight details and payoff moment.',
+        action: 'Build proof and differentiation.',
+        audio: 'Music lift and concise line.',
+        transition: 'Cut',
+        imageUrl: null
+      },
+      {
+        frameNumber: 4,
+        timing: '0:23-0:30',
+        shotType: 'Hero',
+        visual: 'Clean product hero with brand lockup.',
+        action: 'Land message and CTA.',
+        audio: 'Tagline VO and resolve.',
+        transition: 'Fade out',
+        imageUrl: null
+      }
+    ],
+    visualReferences: ['High-end commercial look', 'Clear product storytelling', 'Brand-consistent tone'],
+    productionNotes: ['30-second pacing', 'Readable visuals', 'Simple transitions'],
+    rationale: 'Fallback generated to avoid timeout and keep workflow moving.'
+  }));
+}
+
 export default async (req) => {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
@@ -85,19 +140,38 @@ export default async (req) => {
       .map((v, idx) => `Variation ${idx + 1}: ${v.title}\n${v.description}\nShift: ${v.shift}`)
       .join('\n\n---\n\n');
 
-    const prompt = `You are an expert creative director.\n\nORIGINAL BRIEF:\n${brief}\n\nSELECTED VARIATIONS:\n${variationsText}\n\nGenerate EXACTLY ${expectedCount} final concepts as a JSON array with EXACTLY ${expectedCount} objects.\nEach object must include:\n- number\n- title\n- tagline\n- description (3-4 sentences)\n- storyboardFrames (exactly 4 frames)\n  - frameNumber\n  - timing\n  - shotType\n  - visual\n  - action\n  - audio\n  - transition\n- visualReferences (3-4 bullets)\n- productionNotes (3-4 bullets)\n- rationale (2-3 sentences)\n\nReturn ONLY valid JSON.`;
+    const prompt = `You are an expert creative director.\n\nORIGINAL BRIEF:\n${brief}\n\nSELECTED VARIATIONS:\n${variationsText}\n\nGenerate EXACTLY ${expectedCount} final concepts as a JSON array with EXACTLY ${expectedCount} objects.\nEach object must include: number, title, tagline, description, storyboardFrames (exactly 4 with frameNumber/timing/shotType/visual/action/audio/transition), visualReferences, productionNotes, rationale.\nReturn ONLY valid JSON. Keep output concise.`;
 
-    const message = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 2600,
-      messages: [{ role: 'user', content: prompt }]
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ANTHROPIC_TIMEOUT_MS);
+
+    let message;
+    try {
+      message = await anthropic.messages.create({
+        model: MODEL,
+        max_tokens: 1600,
+        messages: [{ role: 'user', content: prompt }],
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        const concepts = fallbackConceptsFromVariations(selectedVariations);
+        return new Response(JSON.stringify({ concepts, fallback: true, partial: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const responseText = message.content[0].text;
     const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      return new Response(JSON.stringify({ error: 'Failed to parse final concepts from Claude response' }), {
-        status: 500,
+      const concepts = fallbackConceptsFromVariations(selectedVariations);
+      return new Response(JSON.stringify({ concepts, fallback: true, partial: true }), {
+        status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
     }
@@ -106,8 +180,9 @@ export default async (req) => {
     try {
       parsed = JSON.parse(jsonMatch[0]);
     } catch (error) {
-      return new Response(JSON.stringify({ error: 'Failed to parse final concepts JSON', details: error.message }), {
-        status: 500,
+      const concepts = fallbackConceptsFromVariations(selectedVariations);
+      return new Response(JSON.stringify({ concepts, fallback: true, partial: true }), {
+        status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
     }
