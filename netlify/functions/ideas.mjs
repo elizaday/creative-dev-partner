@@ -6,10 +6,11 @@ const JOB_VERSION = 1;
 const START_MODE = 'start';
 const POLL_MODE = 'poll';
 
-const IDEAS_PRIMARY_TIMEOUT_MS = 17000;
-const IDEAS_RESCUE_TIMEOUT_MS = 13000;
-const IDEAS_PRIMARY_MAX_TOKENS = 1900;
-const IDEAS_RESCUE_MAX_TOKENS = 1300;
+const IDEAS_PRIMARY_TIMEOUT_MS = 9000;
+const IDEAS_RESCUE_TIMEOUT_MS = 7000;
+const IDEAS_PRIMARY_MAX_TOKENS = 1500;
+const IDEAS_RESCUE_MAX_TOKENS = 1000;
+const MAX_STAGE_RETRIES = 12;
 
 const STAGE_PLANS = [
   {
@@ -56,6 +57,13 @@ function getIdeaModelPlan() {
     return [...new Set([...envPreferred, ...SONNET_DEFAULT_MODELS])];
   }
   return SONNET_DEFAULT_MODELS;
+}
+
+function selectModelForCursor(models, cursor = 0) {
+  const list = Array.isArray(models) && models.length > 0 ? models : SONNET_DEFAULT_MODELS;
+  const safeCursor = Number.isFinite(Number(cursor)) ? Number(cursor) : 0;
+  const index = Math.abs(Math.trunc(safeCursor)) % list.length;
+  return { model: list[index], index };
 }
 
 function normalizeWhitespace(text) {
@@ -197,6 +205,8 @@ function createEmptyJob(brief) {
     brief: compactText(brief, 7000),
     stageIndex: 0,
     candidates: [],
+    modelCursor: 0,
+    stageRetryCount: 0,
     createdAt: new Date().toISOString(),
     pollCount: 0
   };
@@ -224,6 +234,8 @@ function validateJob(job, briefFromBody = '') {
     version: JOB_VERSION,
     brief,
     stageIndex: safeStageIndex,
+    modelCursor: Number(job.modelCursor || 0),
+    stageRetryCount: Number(job.stageRetryCount || 0),
     pollCount: Number(job.pollCount || 0),
     candidates: Array.isArray(job.candidates) ? job.candidates.slice(0, 30) : []
   };
@@ -232,41 +244,27 @@ function validateJob(job, briefFromBody = '') {
 async function createIdeasMessage(anthropic, prompt, options = {}) {
   const {
     maxTokens = IDEAS_PRIMARY_MAX_TOKENS,
-    temperature = 0.7
+    temperature = 0.7,
+    modelCursor = 0
   } = options;
 
   const models = getIdeaModelPlan();
-  let lastError = null;
+  const selection = selectModelForCursor(models, modelCursor);
+  const isPrimary = selection.index === 0;
+  const timeoutMs = isPrimary ? IDEAS_PRIMARY_TIMEOUT_MS : IDEAS_RESCUE_TIMEOUT_MS;
+  const tokenCap = isPrimary ? maxTokens : Math.min(maxTokens, IDEAS_RESCUE_MAX_TOKENS);
 
-  for (let index = 0; index < models.length; index += 1) {
-    const model = models[index];
-    const isPrimary = index === 0;
-    const timeoutMs = isPrimary ? IDEAS_PRIMARY_TIMEOUT_MS : IDEAS_RESCUE_TIMEOUT_MS;
-    const tokenCap = isPrimary ? maxTokens : Math.min(maxTokens, IDEAS_RESCUE_MAX_TOKENS);
+  const response = await withTimeout(
+    anthropic.messages.create({
+      model: selection.model,
+      max_tokens: tokenCap,
+      temperature,
+      messages: [{ role: 'user', content: prompt }]
+    }),
+    timeoutMs
+  );
 
-    try {
-      const response = await withTimeout(
-        anthropic.messages.create({
-          model,
-          max_tokens: tokenCap,
-          temperature,
-          messages: [{ role: 'user', content: prompt }]
-        }),
-        timeoutMs
-      );
-
-      return { response, model };
-    } catch (error) {
-      lastError = error;
-      if (error.message === TIMEOUT_ERROR || isModelNotFoundError(error) || isRetryableModelError(error)) {
-        console.warn(`Ideas model failed (${model}): ${error.message}. Trying next model.`);
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  throw lastError || new Error('No Sonnet model available for ideas generation.');
+  return { response, model: selection.model };
 }
 
 function buildStagePrompt(brief, stage, existingCandidates) {
@@ -367,7 +365,11 @@ async function runIdeasJobStep(anthropic, job) {
   if (safeJob.stageIndex < STAGE_PLANS.length) {
     const stage = STAGE_PLANS[safeJob.stageIndex];
     const prompt = buildStagePrompt(safeJob.brief, stage, safeJob.candidates);
-    const result = await createIdeasMessage(anthropic, prompt, { maxTokens: 1200, temperature: 0.85 });
+    const result = await createIdeasMessage(anthropic, prompt, {
+      maxTokens: 1200,
+      temperature: 0.85,
+      modelCursor: safeJob.modelCursor
+    });
     const stageIdeas = extractJsonArray(result.response?.content?.[0]?.text || '');
 
     const mergedCandidates = dedupeByTitle([
@@ -379,6 +381,7 @@ async function runIdeasJobStep(anthropic, job) {
       ...safeJob,
       stageIndex: safeJob.stageIndex + 1,
       candidates: mergedCandidates,
+      stageRetryCount: 0,
       pollCount: safeJob.pollCount + 1
     };
 
@@ -391,7 +394,11 @@ async function runIdeasJobStep(anthropic, job) {
   }
 
   const curationPrompt = buildCurationPrompt(safeJob.brief, safeJob.candidates);
-  const curationResult = await createIdeasMessage(anthropic, curationPrompt, { maxTokens: IDEAS_PRIMARY_MAX_TOKENS, temperature: 0.55 });
+  const curationResult = await createIdeasMessage(anthropic, curationPrompt, {
+    maxTokens: IDEAS_PRIMARY_MAX_TOKENS,
+    temperature: 0.55,
+    modelCursor: safeJob.modelCursor
+  });
   const curated = extractJsonArray(curationResult.response?.content?.[0]?.text || '');
   const ideas = materializeIdeas(curated, safeJob.candidates);
 
@@ -456,11 +463,29 @@ export default async (req) => {
         });
       } catch (error) {
         if (isJobRetryableError(error)) {
+          const retryCount = Number(job.stageRetryCount || 0) + 1;
+          if (retryCount > MAX_STAGE_RETRIES) {
+            return new Response(JSON.stringify({
+              error: 'High-quality generation could not complete for this stage after repeated retries. Please restart ideas generation.',
+              details: 'stage_retry_limit_reached'
+            }), {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+
+          const updatedJob = {
+            ...job,
+            modelCursor: Number(job.modelCursor || 0) + 1,
+            stageRetryCount: retryCount,
+            pollCount: Number(job.pollCount || 0) + 1
+          };
+
           return new Response(JSON.stringify({
             status: 'retry_required',
             retryable: true,
             message: 'High-quality generation timed out in this step. Poll again to continue.',
-            job,
+            job: updatedJob,
             progress: stageProgress(job.stageIndex)
           }), {
             status: 200,

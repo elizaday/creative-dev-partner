@@ -8,7 +8,7 @@ import LoadingState from './components/LoadingState';
 const QUALITY_RETRY_ATTEMPTS = 1;
 const QUALITY_RETRY_DELAY_MS = 1200;
 const IDEAS_JOB_POLL_DELAY_MS = 900;
-const IDEAS_JOB_MAX_POLLS = 10;
+const IDEAS_JOB_MAX_POLLS = 24;
 
 function App() {
   const [phase, setPhase] = useState(1);
