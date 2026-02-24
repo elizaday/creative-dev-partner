@@ -1,34 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
 
-const ANTHROPIC_TIMEOUT_MS = 12000;
+const ANTHROPIC_TIMEOUT_MS = 22000;
 const TARGET_IDEA_COUNT = 10;
-const CANDIDATE_IDEA_COUNT = 12;
 
 function extractJsonArray(text) {
   const match = String(text || '').match(/\[[\s\S]*\]/);
   if (!match) throw new Error('No JSON array found');
   return JSON.parse(match[0]);
-}
-
-function extractJsonObject(text) {
-  const match = String(text || '').match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON object found');
-  return JSON.parse(match[0]);
-}
-
-function fallbackStrategy(brief) {
-  const compactBrief = String(brief || '').replace(/\s+/g, ' ').trim();
-  return {
-    audienceInsight: compactBrief.slice(0, 180) || 'Broad audience with practical needs.',
-    brandTension: 'Need to stand out while staying believable.',
-    businessObjective: 'Drive preference and clarity of value.',
-    emotionalNeed: 'Confidence and relevance.',
-    creativeLevers: ['proof', 'contrast', 'human truth', 'clear payoff', 'memorable frame'],
-    constraints: ['30-second format', 'single-minded message'],
-    tabooDirections: ['generic category cliches'],
-    successCriteria: ['distinctive', 'brief-fit', 'production-feasible']
-  };
 }
 
 function buildFallbackIdeas() {
@@ -50,11 +29,9 @@ function buildFallbackIdeas() {
     title: t[0],
     hook: t[1],
     description: `${t[1]} Keep the message simple, specific, and visually clear.`,
-    tags: {
-      tone: t[2],
-      visual: t[3],
-      risk: t[4]
-    },
+    insight: 'Use a clear human truth that reframes category expectations.',
+    whyItWorks: 'It ties the core benefit to a concrete behavioral moment and gives production a clear execution path.',
+    tags: { tone: t[2], visual: t[3], risk: t[4] },
     scenes: [
       'Opening: Establish context and tension quickly.',
       'Build: Introduce product interaction and key benefit.',
@@ -84,14 +61,15 @@ function normalizeIdea(idea, index) {
   const title = idea?.title || `Concept ${index + 1}`;
   const description = idea?.description || 'Clear, brief-fit concept with a distinct execution angle.';
   const hook = idea?.hook || `${title} turns the brief into a specific, memorable story.`;
-
   const scores = idea?.scores || {};
+
   return {
     id: index + 1,
-    candidateId: idea?.candidateId || idea?.id || `candidate-${index + 1}`,
     title,
     hook,
     description,
+    insight: idea?.insight || 'Anchor the concept in a specific audience tension from the brief.',
+    whyItWorks: idea?.whyItWorks || 'It connects message clarity with a distinct creative mechanism.',
     tags: {
       tone: idea?.tags?.tone || 'Balanced',
       visual: idea?.tags?.visual || 'Cinematic',
@@ -99,12 +77,12 @@ function normalizeIdea(idea, index) {
     },
     scenes: normalizeScenes(idea?.scenes),
     scores: {
-      originality: Number(scores.originality || 0),
-      briefFit: Number(scores.briefFit || 0),
-      clarity: Number(scores.clarity || 0),
-      feasibility: Number(scores.feasibility || 0),
-      distinctiveness: Number(scores.distinctiveness || 0),
-      overall: Number(scores.overall || 0)
+      originality: Number(scores.originality || 7),
+      briefFit: Number(scores.briefFit || 8),
+      clarity: Number(scores.clarity || 8),
+      feasibility: Number(scores.feasibility || 7),
+      distinctiveness: Number(scores.distinctiveness || 8),
+      overall: Number(scores.overall || 8)
     }
   };
 }
@@ -128,36 +106,16 @@ function normalizeTopIdeas(ideas) {
   return deduped.slice(0, TARGET_IDEA_COUNT).map((idea, idx) => normalizeIdea(idea, idx));
 }
 
-async function createMessage(anthropic, messages, maxTokens) {
+async function createMessage(anthropic, prompt, maxTokens = 2000) {
   const result = await withTimeout(
     createMessageWithFallback(anthropic, {
       max_tokens: maxTokens,
-      messages
+      messages: [{ role: 'user', content: prompt }]
     }),
     ANTHROPIC_TIMEOUT_MS
   );
+
   return result.response;
-}
-
-function localScoreCandidates(candidates) {
-  return candidates.map((candidate, idx) => {
-    const descriptionLength = (candidate?.description || '').length;
-    const sceneCount = Array.isArray(candidate?.scenes) ? candidate.scenes.length : 0;
-    const originality = Math.min(10, Math.max(5, Math.floor(descriptionLength / 35)));
-    const clarity = sceneCount >= 4 ? 8 : 6;
-
-    return {
-      ...candidate,
-      scores: {
-        originality,
-        briefFit: 7,
-        clarity,
-        feasibility: 7,
-        distinctiveness: Math.min(10, originality + 1),
-        overall: Math.round((originality + 7 + clarity + 7 + Math.min(10, originality + 1)) / 5)
-      }
-    };
-  }).sort((a, b) => (b?.scores?.overall || 0) - (a?.scores?.overall || 0));
 }
 
 export default async (req) => {
@@ -186,33 +144,20 @@ export default async (req) => {
       });
     }
 
-    let strategy = fallbackStrategy(brief);
+    const prompt = `You are a world-class creative director.\n\nCLIENT BRIEF:\n${brief}\n\nTask:\nGenerate EXACTLY 10 high-quality creative directions.\n\nOutput format (JSON array only):\nEach item must include:\n- title (3-6 words)\n- hook (max 20 words)\n- insight (one sentence audience truth/tension this idea is built on)\n- description (3-5 sentences, thoughtful and specific)\n- whyItWorks (1-2 sentences explaining strategic reason this concept should perform)\n- tags { tone, visual, risk }\n- scenes (exactly 4 concise beats: opening, build, turn, resolution)\n- scores { originality, briefFit, clarity, feasibility, distinctiveness, overall }\n\nQuality rules:\n- ideas must be meaningfully different (not cosmetic variants)\n- range from safe to bold\n- each idea must explicitly connect to brief objectives and constraints\n- avoid generic ad cliches\n- each idea must have a clear execution mechanism, not just a theme\n\nScoring rules:\n- each score is integer 1-10\n- overall weighted toward originality + briefFit\n\nReturn ONLY valid JSON array with exactly 10 items.`;
+
+    let ideas;
     try {
-      const strategyPrompt = `Analyze this creative brief and return only JSON with keys:\n\n- audienceInsight\n- brandTension\n- businessObjective\n- emotionalNeed\n- creativeLevers (array of 5)\n- constraints (array)\n- tabooDirections (array)\n- successCriteria (array)\n\nBrief:\n${brief}`;
-
-      const strategyMessage = await createMessage(
-        anthropic,
-        [{ role: 'user', content: strategyPrompt }],
-        450
-      );
-      strategy = extractJsonObject(strategyMessage.content?.[0]?.text || '');
-    } catch (error) {
-      console.warn('Strategic pass fallback:', error.message);
-    }
-
-    let candidates;
-    try {
-      const candidatePrompt = `You are generating candidate creative ideas from a strategy brief.\n\nBRIEF:\n${brief}\n\nSTRATEGY (JSON):\n${JSON.stringify(strategy)}\n\nReturn ONLY a JSON array with exactly ${CANDIDATE_IDEA_COUNT} candidates. Each candidate must include:\n- candidateId\n- title (3-6 words)\n- hook (under 20 words)\n- description (2-3 sentences)\n- tags { tone, visual, risk }\n- scenes (exactly 4 concise beats)\n- noveltyAnchor (what makes it distinct)\n\nMake each candidate structurally different from the others.`;
-
-      const candidateMessage = await createMessage(
-        anthropic,
-        [{ role: 'user', content: candidatePrompt }],
-        1700
-      );
-      candidates = extractJsonArray(candidateMessage.content?.[0]?.text || '');
+      const message = await createMessage(anthropic, prompt, 2100);
+      ideas = extractJsonArray(message.content?.[0]?.text || '');
     } catch (error) {
       if (error.message === TIMEOUT_ERROR) {
-        return new Response(JSON.stringify({ ideas: buildFallbackIdeas(), fallback: true, partial: true }), {
+        return new Response(JSON.stringify({
+          ideas: buildFallbackIdeas(),
+          fallback: true,
+          partial: true,
+          fallbackReason: 'timeout'
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -220,58 +165,19 @@ export default async (req) => {
       throw error;
     }
 
-    const normalizedCandidates = Array.isArray(candidates)
-      ? candidates.slice(0, CANDIDATE_IDEA_COUNT).map((candidate, idx) => ({
-          candidateId: candidate?.candidateId || `candidate-${idx + 1}`,
-          title: candidate?.title,
-          hook: candidate?.hook,
-          description: candidate?.description,
-          tags: candidate?.tags,
-          scenes: candidate?.scenes,
-          noveltyAnchor: candidate?.noveltyAnchor
-        }))
-      : [];
-
-    let rankedCandidates;
-    try {
-      const criticPrompt = `You are a strict creative evaluator.\n\nBRIEF:\n${brief}\n\nSTRATEGY (JSON):\n${JSON.stringify(strategy)}\n\nCANDIDATES (JSON):\n${JSON.stringify(normalizedCandidates)}\n\nReturn ONLY a JSON array with the top ${TARGET_IDEA_COUNT} candidates ranked by quality.\nFor each item, return:\n- candidateId\n- title\n- hook\n- description\n- tags\n- scenes\n- scores { originality, briefFit, clarity, feasibility, distinctiveness, overall }\n\nScoring rules:\n- originality, briefFit, clarity, feasibility, distinctiveness are integers 1-10\n- overall is weighted average with briefFit and originality weighted highest\n- reject repetitive concepts; maximize diversity of approach.`;
-
-      const criticMessage = await createMessage(
-        anthropic,
-        [{ role: 'user', content: criticPrompt }],
-        1400
-      );
-
-      rankedCandidates = extractJsonArray(criticMessage.content?.[0]?.text || '');
-    } catch (error) {
-      console.warn('Critic pass fallback:', error.message);
-      rankedCandidates = localScoreCandidates(normalizedCandidates).slice(0, TARGET_IDEA_COUNT);
-    }
-
-    const candidateMap = new Map(
-      normalizedCandidates.map((candidate) => [String(candidate.candidateId), candidate])
-    );
-
-    const merged = (Array.isArray(rankedCandidates) ? rankedCandidates : []).map((ranked) => {
-      const key = String(ranked?.candidateId || '');
-      const base = candidateMap.get(key) || {};
-      return {
-        ...base,
-        ...ranked,
-        tags: ranked?.tags || base?.tags,
-        scenes: ranked?.scenes || base?.scenes
-      };
-    });
-
-    const ideas = normalizeTopIdeas(merged);
-
-    return new Response(JSON.stringify({ ideas, strategy, qualityPipeline: 'strategy+candidates+critic' }), {
+    return new Response(JSON.stringify({ ideas: normalizeTopIdeas(ideas), qualityPipeline: 'single-pass-scored' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
     console.error('Error generating ideas:', error);
-    return new Response(JSON.stringify({ ideas: buildFallbackIdeas(), fallback: true, partial: true, details: error.message }), {
+    return new Response(JSON.stringify({
+      ideas: buildFallbackIdeas(),
+      fallback: true,
+      partial: true,
+      fallbackReason: 'error',
+      details: error.message
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });

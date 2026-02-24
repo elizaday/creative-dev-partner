@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
 
-const ANTHROPIC_TIMEOUT_MS = 14000;
+const ANTHROPIC_TIMEOUT_MS = 18000;
 const TARGET_FRAME_COUNT = 8;
 const FRAME_TIMINGS = [
   '0:00-0:04',
@@ -14,70 +14,218 @@ const FRAME_TIMINGS = [
   '0:27-0:30'
 ];
 
-function extractJsonObject(text) {
-  const match = String(text || '').match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON object found');
-  return JSON.parse(match[0]);
+const STORY_FUNCTIONS = [
+  'Establish world and current state',
+  'Introduce protagonist objective',
+  'Surface tension or obstacle',
+  'Escalate stakes',
+  'Force a choice or reveal',
+  'Drive toward resolution',
+  'Show consequence and emotional shift',
+  'Land final payoff'
+];
+
+function normalizeWhitespace(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
-function splitScriptIntoAnchors(script) {
-  const normalized = String(script || '')
+function normalizeForMatch(text) {
+  return normalizeWhitespace(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ''));
+}
+
+function toExcerpt(text, maxWords = 18) {
+  const words = normalizeWhitespace(text).split(' ').filter(Boolean);
+  return words.slice(0, maxWords).join(' ');
+}
+
+function isLikelySpeakerCue(line) {
+  const value = normalizeWhitespace(line);
+  if (!value) return false;
+  if (value.length > 30) return false;
+  if (!/^[A-Z0-9 .'-]+$/.test(value)) return false;
+  const wordCount = value.split(' ').filter(Boolean).length;
+  return wordCount > 0 && wordCount <= 4;
+}
+
+function inferShotType(unit, index) {
+  if (unit?.kind === 'scene') return 'Wide';
+  if (unit?.kind === 'dialogue') {
+    return ['Medium Two-Shot', 'Close-up', 'Over-Shoulder', 'Close-up'][index % 4];
+  }
+  return ['Wide', 'Medium', 'Close-up', 'Tracking'][index % 4];
+}
+
+function inferIntent(unit, index) {
+  if (unit?.kind === 'scene') {
+    return 'Orient viewer in location and power dynamics before dialogue begins.';
+  }
+  if (unit?.kind === 'dialogue') {
+    return 'Capture subtext and reaction so spoken line carries emotional meaning.';
+  }
+  return index < 4
+    ? 'Clarify cause-and-effect through physical behavior and staging.'
+    : 'Increase momentum toward emotional and narrative payoff.';
+}
+
+function inferEmotion(unit, index) {
+  if (unit?.kind === 'dialogue') return 'Read the emotional subtext behind the line.';
+  if (unit?.kind === 'scene') return index === 0 ? 'Create orientation and anticipation.' : 'Reframe stakes through environment.';
+  return index < 4 ? 'Build pressure and curiosity.' : 'Release tension with consequence.';
+}
+
+function parseScriptUnits(script) {
+  const lines = String(script || '')
     .replace(/\r/g, '\n')
-    .replace(/\n{2,}/g, '\n')
-    .trim();
+    .split('\n')
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
 
-  const chunks = normalized
-    .split(/\n|(?<=[.!?])\s+/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => value.replace(/^[-\s]+/, '').replace(/[\s]+/g, ' '));
+  const units = [];
+  let pendingSpeaker = null;
 
-  if (!chunks.length) {
-    return Array.from({ length: TARGET_FRAME_COUNT }, (_, index) => `Script beat ${index + 1}`);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const nextLine = lines[i + 1] || '';
+
+    if (/^(INT\.|EXT\.|INT\/EXT\.|EST\.|SCENE\s)/i.test(line)) {
+      pendingSpeaker = null;
+      units.push({ kind: 'scene', text: line });
+      continue;
+    }
+
+    const colonDialogueMatch = line.match(/^([A-Z][A-Z0-9 .'-]{1,30}):\s*(.+)$/);
+    if (colonDialogueMatch) {
+      pendingSpeaker = null;
+      units.push({
+        kind: 'dialogue',
+        speaker: normalizeWhitespace(colonDialogueMatch[1]),
+        text: `${normalizeWhitespace(colonDialogueMatch[1])}: ${normalizeWhitespace(colonDialogueMatch[2])}`
+      });
+      continue;
+    }
+
+    if (isLikelySpeakerCue(line) && nextLine && !isLikelySpeakerCue(nextLine)) {
+      pendingSpeaker = line;
+      continue;
+    }
+
+    if (pendingSpeaker) {
+      units.push({
+        kind: 'dialogue',
+        speaker: pendingSpeaker,
+        text: `${pendingSpeaker}: ${line}`
+      });
+      pendingSpeaker = null;
+      continue;
+    }
+
+    units.push({ kind: 'action', text: line });
   }
 
+  if (!units.length) {
+    units.push({ kind: 'action', text: 'No script beats parsed.' });
+  }
+
+  return units;
+}
+
+function buildBeatAnchors(script) {
+  const units = parseScriptUnits(script);
   const anchors = [];
-  const step = Math.max(1, Math.floor(chunks.length / TARGET_FRAME_COUNT));
+
   for (let i = 0; i < TARGET_FRAME_COUNT; i += 1) {
-    const idx = Math.min(chunks.length - 1, i * step);
-    anchors.push(chunks[idx]);
+    const index = Math.round((i * (units.length - 1)) / Math.max(1, TARGET_FRAME_COUNT - 1));
+    const unit = units[index] || units[units.length - 1];
+    const nextUnit = units[Math.min(index + 1, units.length - 1)] || unit;
+
+    const scriptAnchor = toExcerpt(unit.text, 18);
+    const dialogue = unit.kind === 'dialogue' ? toExcerpt(unit.text, 24) : '';
+
+    anchors.push({
+      beatNumber: i + 1,
+      sourceType: unit.kind,
+      scriptAnchor,
+      dialogue,
+      context: toExcerpt(`${unit.text} ${nextUnit?.text || ''}`, 28),
+      storyFunction: STORY_FUNCTIONS[i],
+      shotTypeHint: inferShotType(unit, i),
+      intentHint: inferIntent(unit, i),
+      emotionalObjectiveHint: inferEmotion(unit, i)
+    });
   }
 
   return anchors;
 }
 
-function buildFallbackStoryboard(script) {
-  const anchors = splitScriptIntoAnchors(script);
-
+function buildFallbackFrame(beat, index) {
   return {
-    title: 'Script Storyboard',
-    summary: 'Eight-frame storyboard generated directly from script beats.',
-    tone: 'Cinematic and script-faithful',
-    frames: anchors.map((anchor, index) => ({
-      frameNumber: index + 1,
-      timing: FRAME_TIMINGS[index],
-      shotType: ['Wide', 'Medium', 'Close-up', 'Wide', 'Medium', 'Close-up', 'POV', 'Hero'][index] || 'Wide',
-      visual: `Visualize this script beat with clear cinematic composition: ${anchor}`,
-      action: `Advance the narrative using this beat: ${anchor}`,
-      audio: `Use script-aligned dialogue/VO from: ${anchor}`,
-      dialogue: anchor,
-      scriptAnchor: anchor,
-      transition: index === TARGET_FRAME_COUNT - 1 ? 'Fade out' : 'Cut',
-      imageUrl: null
-    }))
+    frameNumber: index + 1,
+    timing: FRAME_TIMINGS[index],
+    shotType: beat.shotTypeHint || 'Medium',
+    storyFunction: beat.storyFunction,
+    intent: beat.intentHint,
+    emotionalObjective: beat.emotionalObjectiveHint,
+    visual: `Compose a ${beat.shotTypeHint || 'medium'} frame that clearly stages: ${beat.context}`,
+    action: `Progress the story beat by showing cause and response around: ${beat.scriptAnchor}`,
+    audio: beat.dialogue
+      ? `Prioritize line delivery and reaction: ${beat.dialogue}`
+      : `Use sound design that reinforces this beat: ${beat.scriptAnchor}`,
+    dialogue: beat.dialogue || beat.scriptAnchor,
+    scriptAnchor: beat.scriptAnchor,
+    transition: index === TARGET_FRAME_COUNT - 1 ? 'Fade out' : 'Cut',
+    imageUrl: null
   };
 }
 
-function normalizeFrame(frame, fallbackFrame, index) {
+function buildFallbackStoryboard(script) {
+  const beats = buildBeatAnchors(script);
+  return {
+    title: 'Script Storyboard',
+    summary: 'Eight intentional frames mapped to script beats and narrative function.',
+    tone: 'Script-faithful and purpose-driven',
+    frames: beats.map((beat, index) => buildFallbackFrame(beat, index))
+  };
+}
+
+function cleanGenericText(value, fallbackValue) {
+  const text = normalizeWhitespace(value);
+  if (!text) return fallbackValue;
+  if (/visualize this script beat|advance the narrative using this beat|use script-aligned/i.test(text)) {
+    return fallbackValue;
+  }
+  return text;
+}
+
+function ensureAnchorIsFromScript(anchor, script, fallbackAnchor) {
+  const normalizedScript = normalizeForMatch(script);
+  const candidate = normalizeWhitespace(anchor);
+  if (!candidate) return fallbackAnchor;
+
+  const normalizedCandidate = normalizeForMatch(candidate);
+  if (!normalizedCandidate) return fallbackAnchor;
+
+  return normalizedScript.includes(normalizedCandidate) ? candidate : fallbackAnchor;
+}
+
+function normalizeFrame(frame, fallbackFrame, script, index) {
+  const scriptAnchor = ensureAnchorIsFromScript(
+    frame?.scriptAnchor,
+    script,
+    fallbackFrame.scriptAnchor
+  );
+
   return {
     frameNumber: index + 1,
     timing: frame?.timing || fallbackFrame.timing,
     shotType: frame?.shotType || fallbackFrame.shotType,
-    visual: frame?.visual || fallbackFrame.visual,
-    action: frame?.action || fallbackFrame.action,
-    audio: frame?.audio || fallbackFrame.audio,
-    dialogue: frame?.dialogue || fallbackFrame.dialogue,
-    scriptAnchor: frame?.scriptAnchor || fallbackFrame.scriptAnchor,
+    storyFunction: cleanGenericText(frame?.storyFunction, fallbackFrame.storyFunction),
+    intent: cleanGenericText(frame?.intent, fallbackFrame.intent),
+    emotionalObjective: cleanGenericText(frame?.emotionalObjective, fallbackFrame.emotionalObjective),
+    visual: cleanGenericText(frame?.visual, fallbackFrame.visual),
+    action: cleanGenericText(frame?.action, fallbackFrame.action),
+    audio: cleanGenericText(frame?.audio, fallbackFrame.audio),
+    dialogue: cleanGenericText(frame?.dialogue, fallbackFrame.dialogue),
+    scriptAnchor,
     transition: frame?.transition || fallbackFrame.transition,
     imageUrl: null
   };
@@ -92,7 +240,7 @@ function normalizeStoryboard(raw, script) {
       : [];
 
   const frames = Array.from({ length: TARGET_FRAME_COUNT }, (_, index) =>
-    normalizeFrame(sourceFrames[index], fallback.frames[index], index)
+    normalizeFrame(sourceFrames[index], fallback.frames[index], script, index)
   );
 
   return {
@@ -103,7 +251,7 @@ function normalizeStoryboard(raw, script) {
   };
 }
 
-async function createMessage(anthropic, prompt, maxTokens = 1700) {
+async function createMessage(anthropic, prompt, maxTokens = 2300) {
   const result = await withTimeout(
     createMessageWithFallback(anthropic, {
       max_tokens: maxTokens,
@@ -113,6 +261,12 @@ async function createMessage(anthropic, prompt, maxTokens = 1700) {
   );
 
   return result.response;
+}
+
+function extractJsonObject(text) {
+  const match = String(text || '').match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('No JSON object found');
+  return JSON.parse(match[0]);
 }
 
 export default async (req) => {
@@ -140,17 +294,18 @@ export default async (req) => {
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const beatAnchors = buildBeatAnchors(script);
 
-    const prompt = `You are a professional storyboard artist and script breakdown specialist.\n\nSCRIPT:\n${script}\n\nTask:\nCreate an 8-frame storyboard that stays highly aligned to this script's narrative order and language.\n\nReturn ONLY valid JSON object with keys:\n- title\n- summary\n- tone\n- frames (array of exactly 8 objects)\n\nEach frame must include:\n- frameNumber (1-8)\n- timing (e.g. 0:00-0:04)\n- shotType\n- visual\n- action\n- audio\n- dialogue (direct line or faithful short excerpt from script)\n- scriptAnchor (exact quote from script, <=18 words)\n- transition\n\nHard rules:\n- Maintain script chronology from beginning to end\n- Do not invent unrelated story events\n- Keep visual/action language specific and production-usable\n- 8 frames exactly.`;
+    const prompt = `You are a senior director + storyboard artist.\n\nSCRIPT:\n${script}\n\nBEAT_ANCHORS (JSON, chronological):\n${JSON.stringify(beatAnchors)}\n\nReturn ONLY valid JSON object with keys:\n- title\n- summary\n- tone\n- frames (array of exactly 8 objects)\n\nEach frame must map to the same beatNumber and include:\n- frameNumber\n- timing\n- shotType\n- storyFunction\n- intent (why this camera/staging choice helps the story)\n- emotionalObjective (what audience should feel)\n- visual\n- action\n- audio\n- dialogue\n- scriptAnchor\n- transition\n\nHard rules:\n- Keep chronology exactly aligned to BEAT_ANCHORS order\n- scriptAnchor must be a direct quote or faithful excerpt from its beat\n- Avoid generic placeholders and vague language\n- Make each shot intentional, specific, and production-usable\n- Do not invent unrelated events\n- 8 frames exactly.`;
 
     let parsed;
     try {
-      const message = await createMessage(anthropic, prompt, 1900);
+      const message = await createMessage(anthropic, prompt, 2500);
       parsed = extractJsonObject(message.content?.[0]?.text || '');
     } catch (error) {
       if (error.message === TIMEOUT_ERROR) {
         const storyboard = buildFallbackStoryboard(script);
-        return new Response(JSON.stringify({ storyboard, fallback: true, partial: true }), {
+        return new Response(JSON.stringify({ storyboard, fallback: true, partial: true, fallbackReason: 'timeout' }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -160,7 +315,7 @@ export default async (req) => {
 
     const storyboard = normalizeStoryboard(parsed, script);
 
-    return new Response(JSON.stringify({ storyboard, qualityPipeline: 'script-breakdown-8f' }), {
+    return new Response(JSON.stringify({ storyboard, qualityPipeline: 'beat-anchors+intent' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -170,6 +325,7 @@ export default async (req) => {
       storyboard: buildFallbackStoryboard(''),
       fallback: true,
       partial: true,
+      fallbackReason: 'error',
       details: error.message
     }), {
       status: 200,

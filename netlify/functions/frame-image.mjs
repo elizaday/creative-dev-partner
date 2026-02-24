@@ -2,12 +2,18 @@ const FAL_ENDPOINT = 'https://fal.run/fal-ai/flux/schnell';
 
 function buildPrompt(frame, conceptTitle, conceptDescription) {
   return [
-    `Professional commercial advertisement frame, ${frame?.shotType || 'Wide'} shot.`,
+    `Professional cinematic storyboard frame, ${frame?.shotType || 'Wide'} shot.`,
+    `Story function: ${frame?.storyFunction || ''}`,
+    `Director intent: ${frame?.intent || ''}`,
+    `Emotional objective: ${frame?.emotionalObjective || ''}`,
     frame?.visual || '',
     frame?.action || '',
+    `Narrative anchor: ${frame?.scriptAnchor || ''}`,
+    `Dialogue context: ${frame?.dialogue || ''}`,
     conceptTitle || '',
     conceptDescription || '',
-    'Cinematic lighting, high-end commercial photography, 16:9 aspect ratio.'
+    'Cinematic lighting, high-end commercial photography, 16:9 aspect ratio.',
+    'No text overlays, no subtitles, no typography, no logos.'
   ].join(' ');
 }
 

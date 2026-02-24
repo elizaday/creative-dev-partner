@@ -124,7 +124,7 @@ export default function ScriptStoryboardApp() {
           const response = await callApi('/api/frame-image', {
             frame,
             conceptTitle: storyboard.title,
-            conceptDescription: `${storyboard.summary || ''} Script anchor: ${frame.scriptAnchor || ''}. Dialogue: ${frame.dialogue || ''}`
+            conceptDescription: `${storyboard.summary || ''} Tone: ${storyboard.tone || ''}. Keep visual continuity and character consistency across all 8 frames.`
           });
 
           if (response.imageUrl && !cancelled) {
@@ -238,6 +238,9 @@ export default function ScriptStoryboardApp() {
 
                 <div className="ssb-copy">
                   <p><strong>Script Anchor:</strong> {frame.scriptAnchor}</p>
+                  <p><strong>Story Function:</strong> {frame.storyFunction}</p>
+                  <p><strong>Intent:</strong> {frame.intent}</p>
+                  <p><strong>Emotional Objective:</strong> {frame.emotionalObjective}</p>
                   <p><strong>Visual:</strong> {frame.visual}</p>
                   <p><strong>Action:</strong> {frame.action}</p>
                   <p><strong>Audio:</strong> {frame.audio}</p>

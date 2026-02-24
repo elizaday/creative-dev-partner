@@ -38,7 +38,13 @@ export default function IdeasGrid({ ideas, selectedIdeas, onSelectionChange, onC
               <div className="idea-number">CONCEPT {String(index + 1).padStart(2, '0')}</div>
               <div className="idea-title">{idea.title}</div>
               <div className="idea-hook">"{idea.hook}"</div>
+              {idea.insight && (
+                <div className="idea-desc"><strong>Insight:</strong> {idea.insight}</div>
+              )}
               <div className="idea-desc">{idea.description}</div>
+              {idea.whyItWorks && (
+                <div className="idea-desc"><strong>Why It Works:</strong> {idea.whyItWorks}</div>
+              )}
               {idea.tags && (
                 <div className="idea-tags">
                   {Object.entries(idea.tags).map(([key, value]) => (
