@@ -182,6 +182,13 @@ function App() {
             <div className="logo-divider"></div>
             <div className="tool-name">Creative Development Partner</div>
           </div>
+          <a
+            href="/storyboard.html"
+            className="btn-secondary"
+            style={{ marginRight: '12px', textDecoration: 'none' }}
+          >
+            Script Storyboard App
+          </a>
           <div className="phase-indicator">
             {phases.map((p, idx) => (
               <div key={p.num}>
