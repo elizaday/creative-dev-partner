@@ -5,6 +5,9 @@ import Variations from './components/Variations';
 import FinalConcepts from './components/FinalConcepts';
 import LoadingState from './components/LoadingState';
 
+const QUALITY_RETRY_ATTEMPTS = 3;
+const QUALITY_RETRY_DELAY_MS = 1200;
+
 function App() {
   const [phase, setPhase] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -55,6 +58,33 @@ function App() {
     return data;
   };
 
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const callApiWithQualityRetry = async (url, body, options = {}) => {
+    const {
+      maxAttempts = QUALITY_RETRY_ATTEMPTS,
+      retryDelayMs = QUALITY_RETRY_DELAY_MS,
+      onRetry = () => {}
+    } = options;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const data = await callApi(url, body);
+      if (!data.fallback) {
+        return data;
+      }
+
+      if (attempt < maxAttempts) {
+        onRetry(attempt + 1, maxAttempts);
+        await wait(retryDelayMs * attempt);
+        continue;
+      }
+
+      throw new Error('High-quality generation is still warming up. Please run this step again.');
+    }
+
+    throw new Error('Unable to complete quality generation.');
+  };
+
   const handleGenerateIdeas = async (briefText) => {
     setBrief(briefText);
     setLoading(true);
@@ -62,7 +92,14 @@ function App() {
     setError(null);
 
     try {
-      const data = await callApi('/api/ideas', { brief: briefText });
+      const data = await callApiWithQualityRetry('/api/ideas', { brief: briefText }, {
+        onRetry: (attempt, maxAttempts) => {
+          setLoadingMessage({
+            text: 'Retrying for high-quality ideas...',
+            subtext: `Attempt ${attempt} of ${maxAttempts}`
+          });
+        }
+      });
       setIdeas(data.ideas);
       setPhase(2);
     } catch (err) {
@@ -81,7 +118,14 @@ function App() {
     setError(null);
 
     try {
-      const data = await callApi('/api/variations', { brief, selectedIdeas: selectedIdeaObjects });
+      const data = await callApiWithQualityRetry('/api/variations', { brief, selectedIdeas: selectedIdeaObjects }, {
+        onRetry: (attempt, maxAttempts) => {
+          setLoadingMessage({
+            text: 'Retrying for high-quality variations...',
+            subtext: `Attempt ${attempt} of ${maxAttempts}`
+          });
+        }
+      });
       setVariations(data.variations);
       setPhase(3);
     } catch (err) {
@@ -98,7 +142,14 @@ function App() {
     setError(null);
 
     try {
-      const data = await callApi('/api/final-concepts', { brief, selectedVariations });
+      const data = await callApiWithQualityRetry('/api/final-concepts', { brief, selectedVariations }, {
+        onRetry: (attempt, maxAttempts) => {
+          setLoadingMessage({
+            text: 'Retrying for high-quality final concepts...',
+            subtext: `Attempt ${attempt} of ${maxAttempts}`
+          });
+        }
+      });
       setFinalConcepts(data.concepts);
       setPhase(4);
     } catch (err) {
