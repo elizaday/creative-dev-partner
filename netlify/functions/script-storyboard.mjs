@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
 
-const ANTHROPIC_TIMEOUT_MS = 17000;
+const ANTHROPIC_TIMEOUT_MS = 28000;
 const TARGET_MAX_BEATS = 5;
 const FRAME_TIMINGS = [
   '0:00-0:06',
@@ -310,8 +310,8 @@ function normalizeStoryboard(raw, script, constraints = {}) {
 async function createStoryboardMessage(anthropic, prompt) {
   const { response, model } = await withTimeout(
     createMessageWithFallback(anthropic, {
-      max_tokens: 1800,
-      temperature: 0.8,
+      max_tokens: 1200,
+      temperature: 0.6,
       messages: [{ role: 'user', content: prompt }]
     }),
     ANTHROPIC_TIMEOUT_MS
@@ -321,6 +321,7 @@ async function createStoryboardMessage(anthropic, prompt) {
 }
 
 function buildPrompt(script, constraints, projectName) {
+  const scriptForPrompt = compactText(script, 2800);
   const constraintsEnabled = hasBrandConstraints(constraints);
 
   const constraintsBlock = constraintsEnabled
@@ -336,7 +337,7 @@ Only visualize change.
 If nothing changes, merge or delete.
 
 SCRIPT:
-${script}
+${scriptForPrompt}
 
 PROJECT NAME:
 ${projectName || 'Project'}
