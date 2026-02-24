@@ -6,8 +6,8 @@ const JOB_VERSION = 1;
 const START_MODE = 'start';
 const POLL_MODE = 'poll';
 
-const IDEAS_PRIMARY_TIMEOUT_MS = 9000;
-const IDEAS_RESCUE_TIMEOUT_MS = 7000;
+const IDEAS_PRIMARY_TIMEOUT_MS = 16000;
+const IDEAS_RESCUE_TIMEOUT_MS = 13000;
 const IDEAS_PRIMARY_MAX_TOKENS = 1500;
 const IDEAS_RESCUE_MAX_TOKENS = 1000;
 const MAX_STAGE_RETRIES = 12;
@@ -358,6 +358,13 @@ function isJobRetryableError(error) {
   return error?.message === TIMEOUT_ERROR || isRetryableModelError(error) || isModelNotFoundError(error);
 }
 
+function classifyRetryReason(error) {
+  if (error?.message === TIMEOUT_ERROR) return 'timeout';
+  if (isModelNotFoundError(error)) return 'model_not_found';
+  if (isRetryableModelError(error)) return `upstream_${error?.status || error?.statusCode || 'error'}`;
+  return 'retryable_error';
+}
+
 async function runIdeasJobStep(anthropic, job) {
   const safeJob = validateJob(job);
   const progress = stageProgress(safeJob.stageIndex);
@@ -485,6 +492,7 @@ export default async (req) => {
             status: 'retry_required',
             retryable: true,
             message: 'High-quality generation timed out in this step. Poll again to continue.',
+            retryReason: classifyRetryReason(error),
             job: updatedJob,
             progress: stageProgress(job.stageIndex)
           }), {
