@@ -70,6 +70,11 @@ function isRetryableModelError(error) {
   return [408, 409, 429, 500, 502, 503, 504, 529].includes(status);
 }
 
+function isSonnetModel(model) {
+  const value = String(model || '').toLowerCase();
+  return value.includes('sonnet');
+}
+
 function normalizeWhitespace(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
@@ -380,8 +385,11 @@ async function createStoryboardMessage(anthropic, prompt, options = {}) {
   for (let index = 0; index < models.length; index += 1) {
     const model = models[index];
     const isPrimary = index === 0;
-    const timeoutMs = isPrimary ? primaryTimeoutMs : rescueTimeoutMs;
-    const maxTokens = isPrimary ? primaryMaxTokens : rescueMaxTokens;
+    const sonnet = isSonnetModel(model);
+    const timeoutMs = (isPrimary ? primaryTimeoutMs : rescueTimeoutMs) + (sonnet ? 4500 : 0);
+    const maxTokens = sonnet
+      ? Math.min(isPrimary ? primaryMaxTokens : rescueMaxTokens, 720)
+      : (isPrimary ? primaryMaxTokens : rescueMaxTokens);
 
     try {
       const response = await withTimeout(
