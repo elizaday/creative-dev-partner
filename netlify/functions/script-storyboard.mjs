@@ -103,11 +103,32 @@ function safeProjectName(value) {
 }
 
 function parseScriptLines(script) {
-  return String(script || '')
+  const normalized = String(script || '')
     .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+
+  if (!normalized) return [];
+
+  const explicitLines = normalized
     .split('\n')
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
+
+  const sentenceChunks = normalized
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/g)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+
+  if (explicitLines.length >= 3) {
+    return explicitLines;
+  }
+
+  if (sentenceChunks.length >= 3) {
+    return sentenceChunks;
+  }
+
+  return explicitLines.length ? explicitLines : sentenceChunks;
 }
 
 function parseScriptUnits(script) {
@@ -137,9 +158,9 @@ function parseScriptUnits(script) {
 }
 
 function inferShotType(unit, index) {
-  if (unit?.kind === 'scene') return 'Wide';
-  if (unit?.kind === 'dialogue') return ['Medium', 'Close-up', 'Over-Shoulder'][index % 3];
-  return ['Tracking', 'Medium', 'Close-up', 'Wide'][index % 4];
+  if (unit?.kind === 'scene') return index === 0 ? 'Wide' : 'Tracking';
+  if (unit?.kind === 'dialogue') return ['Over-Shoulder', 'Close-up', 'Medium'][index % 3];
+  return ['Wide', 'Tracking', 'Close-up', 'Medium', 'POV'][index % 5];
 }
 
 function inferContrastFromPrevious(index) {
@@ -177,24 +198,47 @@ function hasBrandConstraints(constraints) {
   return Object.values(constraints || {}).some((value) => normalizeWhitespace(value).length > 0);
 }
 
+const PURPOSE_TEMPLATES = [
+  'Establish baseline power and situational context.',
+  'Introduce friction that destabilizes the current state.',
+  'Escalate conflict through a visible systems consequence.',
+  'Show decisive intervention that flips control.',
+  'Land outcome and lock the brand promise.'
+];
+
+const CUT_LOGIC_TEMPLATES = [
+  'Cut on initiating action to launch momentum.',
+  'Cut at the moment of information reveal for tension.',
+  'Cut at peak instability to force escalation.',
+  'Match cut from problem state to corrective action.',
+  'Hold briefly, then fade to resolved end state.'
+];
+
+const WHY_TEMPLATES = [
+  'Defines what normal looks like before disruption.',
+  'Transforms passive observation into active tension.',
+  'Makes system complexity legible under pressure.',
+  'Demonstrates competence through visible decision-making.',
+  'Converts narrative tension into trust and clarity.'
+];
+
 function buildFallbackFrame(beatNumber, unit, projectContext, index) {
   const shotType = inferShotType(unit, index);
-  const source = compactText(unit?.text || projectContext, 120);
+  const source = compactText(unit?.text || projectContext, 140);
+  const ritualHint = compactText(projectContext, 120);
+  const visualSubject = source || `Key narrative beat ${beatNumber}`;
 
   return {
     frameNumber: beatNumber,
     timing: FRAME_TIMINGS[index] || '',
-    beat: compactText(source || `Beat ${beatNumber}`, 90),
-    purpose: index === 0
-      ? 'Set the baseline power dynamic and narrative objective.'
-      : 'Push the power dynamic into a new strategic state.',
-    visualDecision: `Use a ${shotType.toLowerCase()} setup with hard subject priority and clean negative space.`,
-    whyThisExists: index === TARGET_MAX_BEATS - 1
-      ? 'Converts accumulated tension into a clear final payoff.'
-      : 'Introduces a meaningful transformation rather than coverage.',
-    cutLogic: index === TARGET_MAX_BEATS - 1
-      ? 'Hold half-beat longer, then resolve to end card with certainty.'
-      : 'Cut on a directional action to force forward momentum.',
+    beat: compactText(visualSubject, 120),
+    purpose: PURPOSE_TEMPLATES[index] || 'Advance power dynamics with a meaningful shift.',
+    visualDecision: compactText(
+      `${shotType} framing on ${visualSubject}. Emphasize visual hierarchy and tangible cause-effect progression.`,
+      220
+    ),
+    whyThisExists: WHY_TEMPLATES[index] || 'Ensures this beat changes narrative energy, not coverage.',
+    cutLogic: CUT_LOGIC_TEMPLATES[index] || 'Cut on directional momentum toward the next escalation.',
     contrastFromPrevious: inferContrastFromPrevious(index),
     shotType,
     transition: index === TARGET_MAX_BEATS - 1 ? 'Fade out' : 'Cut',
@@ -212,12 +256,19 @@ function buildFallbackStoryboard(script, constraints = {}, projectName = 'Projec
     return buildFallbackFrame(index + 1, unit, projectContext, index);
   });
 
+  const firstBeat = frames[0]?.beat || 'Opening state';
+  const lastBeat = frames[frames.length - 1]?.beat || 'Resolved state';
+  const shortestUnit = [...units].sort((a, b) => String(a?.text || '').length - String(b?.text || '').length)[0];
+  const sharpest = units.find((unit) => /(mismatch|conflict|tension|problem|risk|resolve|correction)/i.test(unit.text))
+    || units[Math.floor(units.length / 2)]
+    || units[0];
+
   const stressTest = {
-    centralContrast: 'Current state versus transformed state is present but can be sharpened.',
-    powerShift: 'Power moves from uncertainty to decisive control by the final beat.',
-    sharpestMoment: frames[2]?.beat || frames[1]?.beat || 'Escalation beat',
-    removableLine: 'Trim repetitive exposition that does not alter visual stakes.',
-    mutedVisualCheck: 'Pass - the arc remains readable without dialogue.',
+    centralContrast: compactText(`Shift from "${firstBeat}" to "${lastBeat}".`, 240),
+    powerShift: 'Control moves from uncertainty to decisive intervention by the resolution beat.',
+    sharpestMoment: compactText(sharpest?.text || frames[2]?.beat || 'Escalation beat', 160),
+    removableLine: compactText(shortestUnit?.text || 'Trim redundant exposition that does not change stakes.', 180),
+    mutedVisualCheck: 'Pass - visual escalation remains clear without dialogue.',
     scriptStatus: 'usable'
   };
 
@@ -416,78 +467,6 @@ async function createStoryboardMessage(anthropic, prompt, options = {}) {
   throw lastError || new Error('No storyboard model available.');
 }
 
-function buildPrompt(script, constraints, projectName) {
-  const scriptForPrompt = compactText(script, 2800);
-  const constraintsEnabled = hasBrandConstraints(constraints);
-
-  const constraintsBlock = constraintsEnabled
-    ? `BRAND / TONAL CONSTRAINTS (MANDATORY):\n${JSON.stringify(constraints, null, 2)}`
-    : 'BRAND / TONAL CONSTRAINTS: none provided. Proceed narrative-first and avoid product-category assumptions.';
-
-  return `You are a film director generating a transformation-first storyboard.
-
-SCRIPT:
-${scriptForPrompt}
-
-PROJECT NAME:
-${projectName || 'Project'}
-
-${constraintsBlock}
-
-Process:
-1) Stress test script: centralContrast, powerShift, sharpestMoment, removableLine, mutedVisualCheck, scriptStatus.
-2) Compress to 3-${TARGET_MAX_BEATS} beats only.
-3) For each beat, commit one visual choice with clear cut logic.
-
-Rules:
-- Only visualize change.
-- No coverage frames.
-- No script restatement.
-- No alternatives.
-- No dialogue duplication.
-- Every frame must differ from previous in at least one: composition, camera stability, distance, lighting, rhythm.
-- Remove filler beats that do not change power or tone.
-
-Return ONLY valid JSON object:
-{
-  "projectName": "${safeProjectName(projectName || 'Project')}",
-  "title": "string",
-  "summary": "string",
-  "tone": "string",
-  "stressTest": {
-    "centralContrast": "string",
-    "powerShift": "string",
-    "sharpestMoment": "string",
-    "removableLine": "string",
-    "mutedVisualCheck": "Pass|Fail + short reason",
-    "scriptStatus": "usable|rewritten"
-  },
-  "rewriteApplied": true,
-  "rewriteExcerpt": "string",
-  "frames": [
-    {
-      "frameNumber": 1,
-      "timing": "0:00-0:06",
-      "beat": "string",
-      "purpose": "string",
-      "visualDecision": "string",
-      "whyThisExists": "string",
-      "cutLogic": "string",
-      "contrastFromPrevious": "string",
-      "shotType": "Wide|Medium|Close-up|Tracking|POV|Over-Shoulder",
-      "transition": "Cut|Match Cut|Smash Cut|Dissolve|Fade out"
-    }
-  ]
-}
-
-Hard output rules:
-- frames length must be 3 to ${TARGET_MAX_BEATS}
-- no markdown
-- no comments
-- no extra keys
-- concise, production-usable language only.`;
-}
-
 function buildUpgradePrompt(baseStoryboard, script, constraints, projectName) {
   const scriptForPrompt = compactText(script, 1200);
   const constraintsEnabled = hasBrandConstraints(constraints);
@@ -531,13 +510,6 @@ export default async (req) => {
   }
 
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY is not configured' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
     const body = await req.json();
     const script = String(body?.script || '');
     const projectName = safeProjectName(body?.projectName || 'Project');
@@ -550,67 +522,42 @@ export default async (req) => {
       });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const prompt = buildPrompt(script, constraints, projectName);
-
-    let parsed;
-    let baseModelUsed;
-    try {
-      const modelResult = await createStoryboardMessage(anthropic, prompt, {
-        modelPlan: getStoryboardBaseModelPlan(),
-        primaryTimeoutMs: BASE_PRIMARY_TIMEOUT_MS,
-        rescueTimeoutMs: BASE_RESCUE_TIMEOUT_MS,
-        primaryMaxTokens: BASE_PRIMARY_MAX_TOKENS,
-        rescueMaxTokens: BASE_RESCUE_MAX_TOKENS,
-        temperature: 0.55
-      });
-      baseModelUsed = modelResult.model;
-      parsed = extractJsonObject(modelResult.response?.content?.[0]?.text || '');
-    } catch (error) {
-      if (error.message === TIMEOUT_ERROR || isRetryableModelError(error) || isModelNotFoundError(error)) {
-        const storyboard = buildFallbackStoryboard(script, constraints, projectName);
-        return new Response(JSON.stringify({
-          storyboard,
-          fallback: true,
-          partial: true,
-          fallbackReason: 'timeout_or_upstream'
-        }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-      throw error;
-    }
-
-    const baseStoryboard = normalizeStoryboard(parsed, script, constraints);
+    const anthropic = process.env.ANTHROPIC_API_KEY
+      ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+      : null;
+    const baseStoryboard = buildFallbackStoryboard(script, constraints, projectName);
     let storyboard = baseStoryboard;
     let upgradeApplied = false;
     let upgradeModelUsed = null;
 
-    try {
-      const upgradePrompt = buildUpgradePrompt(baseStoryboard, script, constraints, projectName);
-      const upgradeResult = await createStoryboardMessage(anthropic, upgradePrompt, {
-        modelPlan: getStoryboardUpgradeModelPlan(),
-        primaryTimeoutMs: UPGRADE_PRIMARY_TIMEOUT_MS,
-        rescueTimeoutMs: UPGRADE_RESCUE_TIMEOUT_MS,
-        primaryMaxTokens: UPGRADE_PRIMARY_MAX_TOKENS,
-        rescueMaxTokens: UPGRADE_RESCUE_MAX_TOKENS,
-        temperature: 0.45
-      });
+    if (anthropic) {
+      try {
+        const upgradePrompt = buildUpgradePrompt(baseStoryboard, script, constraints, projectName);
+        const upgradeResult = await createStoryboardMessage(anthropic, upgradePrompt, {
+          modelPlan: getStoryboardUpgradeModelPlan(),
+          primaryTimeoutMs: UPGRADE_PRIMARY_TIMEOUT_MS,
+          rescueTimeoutMs: UPGRADE_RESCUE_TIMEOUT_MS,
+          primaryMaxTokens: UPGRADE_PRIMARY_MAX_TOKENS,
+          rescueMaxTokens: UPGRADE_RESCUE_MAX_TOKENS,
+          temperature: 0.45
+        });
 
-      const upgradedParsed = extractJsonObject(upgradeResult.response?.content?.[0]?.text || '');
-      storyboard = normalizeStoryboard(upgradedParsed, script, constraints);
-      upgradeApplied = true;
-      upgradeModelUsed = upgradeResult.model;
-    } catch (error) {
-      console.warn(`Storyboard upgrade skipped: ${error.message}`);
+        const upgradedParsed = extractJsonObject(upgradeResult.response?.content?.[0]?.text || '');
+        storyboard = normalizeStoryboard(upgradedParsed, script, constraints);
+        upgradeApplied = true;
+        upgradeModelUsed = upgradeResult.model;
+      } catch (error) {
+        console.warn(`Storyboard upgrade skipped: ${error.message}`);
+      }
+    } else {
+      console.warn('Storyboard upgrade skipped: ANTHROPIC_API_KEY not configured.');
     }
 
     return new Response(JSON.stringify({
       storyboard,
       qualityPipeline: 'director-guardrails-v4-two-pass',
       modelUsed: {
-        base: baseModelUsed,
+        base: 'deterministic',
         upgrade: upgradeModelUsed
       },
       upgradeApplied
