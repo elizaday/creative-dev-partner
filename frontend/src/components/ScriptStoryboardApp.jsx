@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
+import { createStoryboardPdfDownload } from '../utils/storyboardPdfExport';
 
 const SCRIPT_RETRY_ATTEMPTS = 1;
 const SCRIPT_RETRY_DELAY_MS = 1200;
 const IMAGE_CONCURRENCY = 2;
+
+const EMPTY_CONSTRAINTS = {
+  mandatoryVisualElements: '',
+  requiredProductRituals: '',
+  iconographyRules: '',
+  toneRestrictions: '',
+  hardExclusions: ''
+};
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,7 +65,10 @@ async function callWithQualityRetry(url, body, onRetry) {
 }
 
 export default function ScriptStoryboardApp() {
+  const [projectName, setProjectName] = useState('');
   const [script, setScript] = useState('');
+  const [constraints, setConstraints] = useState(EMPTY_CONSTRAINTS);
+
   const [loading, setLoading] = useState(false);
   const [loadingText, setLoadingText] = useState('');
   const [error, setError] = useState(null);
@@ -65,6 +77,9 @@ export default function ScriptStoryboardApp() {
   const [storyboard, setStoryboard] = useState(null);
   const [imageStats, setImageStats] = useState({ total: 0, done: 0, running: false });
   const [generationRunId, setGenerationRunId] = useState(0);
+
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfDownload, setPdfDownload] = useState(null);
 
   const isScriptValid = script.trim().length >= 80;
 
@@ -75,21 +90,54 @@ export default function ScriptStoryboardApp() {
       .filter(({ frame }) => !frame.imageUrl);
   }, [storyboard]);
 
+  useEffect(() => {
+    return () => {
+      if (pdfDownload?.url) {
+        URL.revokeObjectURL(pdfDownload.url);
+      }
+    };
+  }, [pdfDownload]);
+
+  const clearPdfDownload = () => {
+    if (pdfDownload?.url) {
+      URL.revokeObjectURL(pdfDownload.url);
+    }
+    setPdfDownload(null);
+  };
+
+  const handleConstraintChange = (field, value) => {
+    setConstraints((prev) => ({ ...prev, [field]: value }));
+  };
+
   const handleGenerateStoryboard = async () => {
     setLoading(true);
-    setLoadingText('Breaking script into storyboard beats...');
+    setLoadingText('Running script stress test and beat compression...');
     setError(null);
     setWarning(null);
+    clearPdfDownload();
 
     try {
-      const data = await callWithQualityRetry('/api/script-storyboard', { script }, (attempt, max) => {
-        setLoadingText('Retrying for high-quality script alignment...');
-      });
+      const data = await callWithQualityRetry(
+        '/api/script-storyboard',
+        {
+          script,
+          projectName,
+          constraints
+        },
+        () => {
+          setLoadingText('Retrying for high-quality storyboard decisions...');
+        }
+      );
 
       setStoryboard(data.storyboard);
-      if (data.qualityDegraded) {
-        setWarning('Showing fallback storyboard because high-quality alignment timed out. You can still generate images, then retry for a stronger pass.');
+      if (data.storyboard?.projectName && !projectName.trim()) {
+        setProjectName(data.storyboard.projectName);
       }
+
+      if (data.qualityDegraded) {
+        setWarning('Showing fallback storyboard because high-quality generation timed out. You can proceed and retry this step later.');
+      }
+
       setGenerationRunId((prev) => prev + 1);
     } catch (err) {
       setError(err.message);
@@ -97,6 +145,22 @@ export default function ScriptStoryboardApp() {
     } finally {
       setLoading(false);
       setLoadingText('');
+    }
+  };
+
+  const handleCreatePdf = async () => {
+    if (!storyboard) return;
+    setPdfLoading(true);
+    setError(null);
+
+    try {
+      clearPdfDownload();
+      const result = await createStoryboardPdfDownload(storyboard);
+      setPdfDownload(result);
+    } catch (err) {
+      setError(`Failed to create PDF: ${err.message}`);
+    } finally {
+      setPdfLoading(false);
     }
   };
 
@@ -115,6 +179,7 @@ export default function ScriptStoryboardApp() {
       while (!cancelled) {
         const taskIndex = cursor;
         cursor += 1;
+
         if (taskIndex >= framesToGenerate.length) break;
 
         const task = framesToGenerate[taskIndex];
@@ -124,7 +189,7 @@ export default function ScriptStoryboardApp() {
           const response = await callApi('/api/frame-image', {
             frame,
             conceptTitle: storyboard.title,
-            conceptDescription: `${storyboard.summary || ''} Tone: ${storyboard.tone || ''}. Keep visual continuity and character consistency across all 8 frames.`
+            conceptDescription: `${storyboard.summary || ''} Tone: ${storyboard.tone || ''}. Maintain continuity across ${storyboard.frames.length} storyboard frames.`
           });
 
           if (response.imageUrl && !cancelled) {
@@ -165,20 +230,77 @@ export default function ScriptStoryboardApp() {
       <header className="ssb-header">
         <div>
           <div className="ssb-eyebrow">SCRIPT TO STORYBOARD</div>
-          <h1>Storyboard Alignment Studio</h1>
-          <p>Paste a script and generate an 8-frame storyboard with FAL-powered visuals aligned to script beats.</p>
+          <h1>Director Storyboard Studio</h1>
+          <p>
+            Stress-test script intention, compress to high-contrast beats, and generate image-backed boards with decisive visual logic.
+          </p>
         </div>
         <a className="ssb-link" href="/">Open Creative Development Partner</a>
       </header>
 
       <section className="ssb-panel">
-        <label htmlFor="script-input">Script</label>
+        <label htmlFor="project-name">Project Name (for PDF export)</label>
+        <input
+          id="project-name"
+          className="ssb-input"
+          type="text"
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          placeholder="Example: SmartLabel Launch"
+        />
+
+        <label htmlFor="script-input" style={{ marginTop: '14px' }}>Script</label>
         <textarea
           id="script-input"
           value={script}
           onChange={(e) => setScript(e.target.value)}
-          placeholder="Paste your full script here (dialogue + action + audio cues)..."
+          placeholder="Paste full script with action and dialogue..."
         />
+
+        <div className="ssb-constraints-head">Brand and Tonal Constraints (optional but recommended)</div>
+        <div className="ssb-constraints-grid">
+          <label>
+            Mandatory Visual Elements
+            <textarea
+              value={constraints.mandatoryVisualElements}
+              onChange={(e) => handleConstraintChange('mandatoryVisualElements', e.target.value)}
+              placeholder="Non-negotiable visuals or assets"
+            />
+          </label>
+          <label>
+            Required Product Rituals
+            <textarea
+              value={constraints.requiredProductRituals}
+              onChange={(e) => handleConstraintChange('requiredProductRituals', e.target.value)}
+              placeholder="Moments that must be shown"
+            />
+          </label>
+          <label>
+            Iconography Rules
+            <textarea
+              value={constraints.iconographyRules}
+              onChange={(e) => handleConstraintChange('iconographyRules', e.target.value)}
+              placeholder="Brand marks, symbols, treatment rules"
+            />
+          </label>
+          <label>
+            Tone Restrictions
+            <textarea
+              value={constraints.toneRestrictions}
+              onChange={(e) => handleConstraintChange('toneRestrictions', e.target.value)}
+              placeholder="Tone boundaries to enforce"
+            />
+          </label>
+          <label>
+            Hard Exclusions
+            <textarea
+              value={constraints.hardExclusions}
+              onChange={(e) => handleConstraintChange('hardExclusions', e.target.value)}
+              placeholder="What must never appear"
+            />
+          </label>
+        </div>
+
         <div className="ssb-toolbar">
           <span>{script.trim().length} chars</span>
           <button
@@ -186,9 +308,10 @@ export default function ScriptStoryboardApp() {
             onClick={handleGenerateStoryboard}
             disabled={!isScriptValid || loading}
           >
-            {loading ? 'Generating...' : 'Generate 8-Frame Storyboard'}
+            {loading ? 'Generating...' : 'Generate Director Storyboard'}
           </button>
         </div>
+
         {loadingText && <p className="ssb-status">{loadingText}</p>}
         {warning && <p className="ssb-status">{warning}</p>}
         {error && <p className="ssb-error">{error}</p>}
@@ -205,6 +328,24 @@ export default function ScriptStoryboardApp() {
               <div>{storyboard.frames?.length || 0} frames</div>
               <div>{storyboard.tone}</div>
             </div>
+          </div>
+
+          <div className="ssb-stress-grid">
+            <div><strong>Central Contrast:</strong> {storyboard.stressTest?.centralContrast}</div>
+            <div><strong>Power Shift:</strong> {storyboard.stressTest?.powerShift}</div>
+            <div><strong>Sharpest Moment:</strong> {storyboard.stressTest?.sharpestMoment}</div>
+            <div><strong>Muted Visual Check:</strong> {storyboard.stressTest?.mutedVisualCheck}</div>
+          </div>
+
+          <div className="ssb-export-row">
+            <button className="ssb-btn" onClick={handleCreatePdf} disabled={pdfLoading}>
+              {pdfLoading ? 'Creating PDF...' : 'Create Storyboard PDF'}
+            </button>
+            {pdfDownload && (
+              <a className="ssb-download" href={pdfDownload.url} download={pdfDownload.filename}>
+                Download {pdfDownload.filename}
+              </a>
+            )}
           </div>
 
           {imageStats.total > 0 && (
@@ -237,14 +378,12 @@ export default function ScriptStoryboardApp() {
                 </div>
 
                 <div className="ssb-copy">
-                  <p><strong>Script Anchor:</strong> {frame.scriptAnchor}</p>
-                  <p><strong>Story Function:</strong> {frame.storyFunction}</p>
-                  <p><strong>Intent:</strong> {frame.intent}</p>
-                  <p><strong>Emotional Objective:</strong> {frame.emotionalObjective}</p>
-                  <p><strong>Visual:</strong> {frame.visual}</p>
-                  <p><strong>Action:</strong> {frame.action}</p>
-                  <p><strong>Audio:</strong> {frame.audio}</p>
-                  <p><strong>Dialogue:</strong> {frame.dialogue}</p>
+                  <p><strong>Beat:</strong> {frame.beat}</p>
+                  <p><strong>Purpose:</strong> {frame.purpose}</p>
+                  <p><strong>Visual Decision:</strong> {frame.visualDecision}</p>
+                  <p><strong>Why This Exists:</strong> {frame.whyThisExists}</p>
+                  <p><strong>Cut Logic:</strong> {frame.cutLogic}</p>
+                  <p><strong>Contrast:</strong> {frame.contrastFromPrevious}</p>
                 </div>
               </article>
             ))}

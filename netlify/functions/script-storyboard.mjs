@@ -1,121 +1,66 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
 
-const ANTHROPIC_TIMEOUT_MS = 18000;
-const TARGET_FRAME_COUNT = 8;
+const ANTHROPIC_TIMEOUT_MS = 17000;
+const TARGET_MAX_BEATS = 5;
 const FRAME_TIMINGS = [
-  '0:00-0:04',
-  '0:04-0:08',
-  '0:08-0:12',
-  '0:12-0:16',
-  '0:16-0:20',
-  '0:20-0:24',
-  '0:24-0:27',
-  '0:27-0:30'
+  '0:00-0:06',
+  '0:06-0:12',
+  '0:12-0:18',
+  '0:18-0:24',
+  '0:24-0:30'
 ];
 
-const STORY_FUNCTIONS = [
-  'Establish world and current state',
-  'Introduce protagonist objective',
-  'Surface tension or obstacle',
-  'Escalate stakes',
-  'Force a choice or reveal',
-  'Drive toward resolution',
-  'Show consequence and emotional shift',
-  'Land final payoff'
-];
+const CONTRAST_DIMENSIONS = ['composition', 'camera stability', 'distance', 'lighting', 'rhythm'];
 
 function normalizeWhitespace(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
-function normalizeForMatch(text) {
-  return normalizeWhitespace(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ''));
+function compactText(text, maxLen = 260) {
+  const value = normalizeWhitespace(text);
+  if (!value) return '';
+  return value.length <= maxLen ? value : `${value.slice(0, maxLen - 1)}…`;
 }
 
-function toExcerpt(text, maxWords = 18) {
-  const words = normalizeWhitespace(text).split(' ').filter(Boolean);
-  return words.slice(0, maxWords).join(' ');
+function titleCase(value) {
+  const text = normalizeWhitespace(value);
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
 }
 
-function isLikelySpeakerCue(line) {
-  const value = normalizeWhitespace(line);
-  if (!value) return false;
-  if (value.length > 30) return false;
-  if (!/^[A-Z0-9 .'-]+$/.test(value)) return false;
-  const wordCount = value.split(' ').filter(Boolean).length;
-  return wordCount > 0 && wordCount <= 4;
+function safeProjectName(value) {
+  const cleaned = normalizeWhitespace(String(value || '').replace(/[^a-zA-Z0-9\s-]/g, ''));
+  if (!cleaned) return 'Project';
+  return titleCase(cleaned).slice(0, 60);
 }
 
-function inferShotType(unit, index) {
-  if (unit?.kind === 'scene') return 'Wide';
-  if (unit?.kind === 'dialogue') {
-    return ['Medium Two-Shot', 'Close-up', 'Over-Shoulder', 'Close-up'][index % 4];
-  }
-  return ['Wide', 'Medium', 'Close-up', 'Tracking'][index % 4];
-}
-
-function inferIntent(unit, index) {
-  if (unit?.kind === 'scene') {
-    return 'Orient viewer in location and power dynamics before dialogue begins.';
-  }
-  if (unit?.kind === 'dialogue') {
-    return 'Capture subtext and reaction so spoken line carries emotional meaning.';
-  }
-  return index < 4
-    ? 'Clarify cause-and-effect through physical behavior and staging.'
-    : 'Increase momentum toward emotional and narrative payoff.';
-}
-
-function inferEmotion(unit, index) {
-  if (unit?.kind === 'dialogue') return 'Read the emotional subtext behind the line.';
-  if (unit?.kind === 'scene') return index === 0 ? 'Create orientation and anticipation.' : 'Reframe stakes through environment.';
-  return index < 4 ? 'Build pressure and curiosity.' : 'Release tension with consequence.';
-}
-
-function parseScriptUnits(script) {
-  const lines = String(script || '')
+function parseScriptLines(script) {
+  return String(script || '')
     .replace(/\r/g, '\n')
     .split('\n')
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
+}
 
+function parseScriptUnits(script) {
+  const lines = parseScriptLines(script);
   const units = [];
-  let pendingSpeaker = null;
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    const nextLine = lines[i + 1] || '';
-
+  for (const line of lines) {
     if (/^(INT\.|EXT\.|INT\/EXT\.|EST\.|SCENE\s)/i.test(line)) {
-      pendingSpeaker = null;
       units.push({ kind: 'scene', text: line });
       continue;
     }
 
-    const colonDialogueMatch = line.match(/^([A-Z][A-Z0-9 .'-]{1,30}):\s*(.+)$/);
-    if (colonDialogueMatch) {
-      pendingSpeaker = null;
-      units.push({
-        kind: 'dialogue',
-        speaker: normalizeWhitespace(colonDialogueMatch[1]),
-        text: `${normalizeWhitespace(colonDialogueMatch[1])}: ${normalizeWhitespace(colonDialogueMatch[2])}`
-      });
-      continue;
-    }
-
-    if (isLikelySpeakerCue(line) && nextLine && !isLikelySpeakerCue(nextLine)) {
-      pendingSpeaker = line;
-      continue;
-    }
-
-    if (pendingSpeaker) {
-      units.push({
-        kind: 'dialogue',
-        speaker: pendingSpeaker,
-        text: `${pendingSpeaker}: ${line}`
-      });
-      pendingSpeaker = null;
+    const dialogueLine = line.match(/^([A-Z][A-Z0-9 .'-]{1,30}):\s*(.+)$/);
+    if (dialogueLine) {
+      units.push({ kind: 'dialogue', text: `${dialogueLine[1]}: ${dialogueLine[2]}` });
       continue;
     }
 
@@ -123,150 +68,354 @@ function parseScriptUnits(script) {
   }
 
   if (!units.length) {
-    units.push({ kind: 'action', text: 'No script beats parsed.' });
+    units.push({ kind: 'action', text: 'No actionable script units found.' });
   }
 
   return units;
 }
 
-function buildBeatAnchors(script) {
-  const units = parseScriptUnits(script);
-  const anchors = [];
-
-  for (let i = 0; i < TARGET_FRAME_COUNT; i += 1) {
-    const index = Math.round((i * (units.length - 1)) / Math.max(1, TARGET_FRAME_COUNT - 1));
-    const unit = units[index] || units[units.length - 1];
-    const nextUnit = units[Math.min(index + 1, units.length - 1)] || unit;
-
-    const scriptAnchor = toExcerpt(unit.text, 18);
-    const dialogue = unit.kind === 'dialogue' ? toExcerpt(unit.text, 24) : '';
-
-    anchors.push({
-      beatNumber: i + 1,
-      sourceType: unit.kind,
-      scriptAnchor,
-      dialogue,
-      context: toExcerpt(`${unit.text} ${nextUnit?.text || ''}`, 28),
-      storyFunction: STORY_FUNCTIONS[i],
-      shotTypeHint: inferShotType(unit, i),
-      intentHint: inferIntent(unit, i),
-      emotionalObjectiveHint: inferEmotion(unit, i)
-    });
-  }
-
-  return anchors;
+function inferShotType(unit, index) {
+  if (unit?.kind === 'scene') return 'Wide';
+  if (unit?.kind === 'dialogue') return ['Medium', 'Close-up', 'Over-Shoulder'][index % 3];
+  return ['Tracking', 'Medium', 'Close-up', 'Wide'][index % 4];
 }
 
-function buildFallbackFrame(beat, index) {
+function inferContrastFromPrevious(index) {
+  if (index === 0) return 'Opens with controlled framing and stable rhythm to set baseline energy.';
+
+  const dimension = CONTRAST_DIMENSIONS[(index - 1) % CONTRAST_DIMENSIONS.length];
+  if (dimension === 'composition') {
+    return 'Composition shifts to a tighter focal hierarchy than the previous frame.';
+  }
+  if (dimension === 'camera stability') {
+    return 'Camera stability changes from locked framing to kinetic movement.';
+  }
+  if (dimension === 'distance') {
+    return 'Distance changes from wider coverage to proximity-driven framing.';
+  }
+  if (dimension === 'lighting') {
+    return 'Lighting pivots toward higher contrast to raise urgency.';
+  }
+  return 'Rhythm accelerates through shorter visual beats and faster cut logic.';
+}
+
+function normalizeBrandConstraints(input) {
+  const source = input && typeof input === 'object' ? input : {};
+
   return {
-    frameNumber: index + 1,
-    timing: FRAME_TIMINGS[index],
-    shotType: beat.shotTypeHint || 'Medium',
-    storyFunction: beat.storyFunction,
-    intent: beat.intentHint,
-    emotionalObjective: beat.emotionalObjectiveHint,
-    visual: `Compose a ${beat.shotTypeHint || 'medium'} frame that clearly stages: ${beat.context}`,
-    action: `Progress the story beat by showing cause and response around: ${beat.scriptAnchor}`,
-    audio: beat.dialogue
-      ? `Prioritize line delivery and reaction: ${beat.dialogue}`
-      : `Use sound design that reinforces this beat: ${beat.scriptAnchor}`,
-    dialogue: beat.dialogue || beat.scriptAnchor,
-    scriptAnchor: beat.scriptAnchor,
-    transition: index === TARGET_FRAME_COUNT - 1 ? 'Fade out' : 'Cut',
+    mandatoryVisualElements: compactText(source.mandatoryVisualElements, 500),
+    requiredProductRituals: compactText(source.requiredProductRituals, 500),
+    iconographyRules: compactText(source.iconographyRules, 500),
+    toneRestrictions: compactText(source.toneRestrictions, 500),
+    hardExclusions: compactText(source.hardExclusions, 500)
+  };
+}
+
+function hasBrandConstraints(constraints) {
+  return Object.values(constraints || {}).some((value) => normalizeWhitespace(value).length > 0);
+}
+
+function buildFallbackFrame(beatNumber, unit, projectContext, index) {
+  const shotType = inferShotType(unit, index);
+  const source = compactText(unit?.text || projectContext, 120);
+
+  return {
+    frameNumber: beatNumber,
+    timing: FRAME_TIMINGS[index] || '',
+    beat: compactText(source || `Beat ${beatNumber}`, 90),
+    purpose: index === 0
+      ? 'Set the baseline power dynamic and narrative objective.'
+      : 'Push the power dynamic into a new strategic state.',
+    visualDecision: `Use a ${shotType.toLowerCase()} setup with hard subject priority and clean negative space.`,
+    whyThisExists: index === TARGET_MAX_BEATS - 1
+      ? 'Converts accumulated tension into a clear final payoff.'
+      : 'Introduces a meaningful transformation rather than coverage.',
+    cutLogic: index === TARGET_MAX_BEATS - 1
+      ? 'Hold half-beat longer, then resolve to end card with certainty.'
+      : 'Cut on a directional action to force forward momentum.',
+    contrastFromPrevious: inferContrastFromPrevious(index),
+    shotType,
+    transition: index === TARGET_MAX_BEATS - 1 ? 'Fade out' : 'Cut',
     imageUrl: null
   };
 }
 
-function buildFallbackStoryboard(script) {
-  const beats = buildBeatAnchors(script);
+function buildFallbackStoryboard(script, constraints = {}) {
+  const units = parseScriptUnits(script);
+  const projectContext = units.map((unit) => unit.text).join(' ');
+
+  const frames = Array.from({ length: TARGET_MAX_BEATS }, (_, index) => {
+    const unitIndex = Math.round((index * (units.length - 1)) / Math.max(1, TARGET_MAX_BEATS - 1));
+    const unit = units[unitIndex] || units[units.length - 1];
+    return buildFallbackFrame(index + 1, unit, projectContext, index);
+  });
+
+  const stressTest = {
+    centralContrast: 'Current state versus transformed state is present but can be sharpened.',
+    powerShift: 'Power moves from uncertainty to decisive control by the final beat.',
+    sharpestMoment: frames[2]?.beat || frames[1]?.beat || 'Escalation beat',
+    removableLine: 'Trim repetitive exposition that does not alter visual stakes.',
+    mutedVisualCheck: 'Pass - the arc remains readable without dialogue.',
+    scriptStatus: 'usable'
+  };
+
   return {
-    title: 'Script Storyboard',
-    summary: 'Eight intentional frames mapped to script beats and narrative function.',
-    tone: 'Script-faithful and purpose-driven',
-    frames: beats.map((beat, index) => buildFallbackFrame(beat, index))
+    projectName: safeProjectName('Project'),
+    title: 'Director Storyboard',
+    summary: 'Five high-contrast beats engineered around transformation, not coverage.',
+    tone: constraints.toneRestrictions || 'Cinematic, decisive, contrast-forward',
+    stressTest,
+    rewriteApplied: false,
+    rewriteExcerpt: '',
+    frames
   };
 }
 
-function cleanGenericText(value, fallbackValue) {
-  const text = normalizeWhitespace(value);
-  if (!text) return fallbackValue;
-  if (/visualize this script beat|advance the narrative using this beat|use script-aligned/i.test(text)) {
-    return fallbackValue;
+function extractJsonObject(text) {
+  const source = String(text || '').trim();
+  if (!source) throw new Error('No response text');
+
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    return JSON.parse(fenced[1]);
   }
-  return text;
+
+  if (source.startsWith('{')) {
+    return JSON.parse(source);
+  }
+
+  const start = source.indexOf('{');
+  if (start === -1) throw new Error('No JSON object found');
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return JSON.parse(source.slice(start, i + 1));
+      }
+    }
+  }
+
+  throw new Error('Could not parse JSON object');
 }
 
-function ensureAnchorIsFromScript(anchor, script, fallbackAnchor) {
-  const normalizedScript = normalizeForMatch(script);
-  const candidate = normalizeWhitespace(anchor);
-  if (!candidate) return fallbackAnchor;
+function normalizeContrastText(value, fallbackValue) {
+  const text = compactText(value, 180);
+  if (!text) return fallbackValue;
 
-  const normalizedCandidate = normalizeForMatch(candidate);
-  if (!normalizedCandidate) return fallbackAnchor;
-
-  return normalizedScript.includes(normalizedCandidate) ? candidate : fallbackAnchor;
-}
-
-function normalizeFrame(frame, fallbackFrame, script, index) {
-  const scriptAnchor = ensureAnchorIsFromScript(
-    frame?.scriptAnchor,
-    script,
-    fallbackFrame.scriptAnchor
+  const hasContrastDimension = CONTRAST_DIMENSIONS.some((dimension) =>
+    text.toLowerCase().includes(dimension.replace(/\s+/g, '')) ||
+    text.toLowerCase().includes(dimension)
   );
 
+  if (hasContrastDimension) return text;
+
+  return `${text} Contrast change is anchored in composition and rhythm.`;
+}
+
+function normalizeFrame(frame, fallbackFrame, index) {
+  const beatNumber = index + 1;
   return {
-    frameNumber: index + 1,
-    timing: frame?.timing || fallbackFrame.timing,
-    shotType: frame?.shotType || fallbackFrame.shotType,
-    storyFunction: cleanGenericText(frame?.storyFunction, fallbackFrame.storyFunction),
-    intent: cleanGenericText(frame?.intent, fallbackFrame.intent),
-    emotionalObjective: cleanGenericText(frame?.emotionalObjective, fallbackFrame.emotionalObjective),
-    visual: cleanGenericText(frame?.visual, fallbackFrame.visual),
-    action: cleanGenericText(frame?.action, fallbackFrame.action),
-    audio: cleanGenericText(frame?.audio, fallbackFrame.audio),
-    dialogue: cleanGenericText(frame?.dialogue, fallbackFrame.dialogue),
-    scriptAnchor,
-    transition: frame?.transition || fallbackFrame.transition,
+    frameNumber: beatNumber,
+    timing: frame?.timing || fallbackFrame.timing || FRAME_TIMINGS[index] || '',
+    beat: compactText(frame?.beat || fallbackFrame.beat || `Beat ${beatNumber}`, 90),
+    purpose: compactText(frame?.purpose || fallbackFrame.purpose, 180),
+    visualDecision: compactText(frame?.visualDecision || fallbackFrame.visualDecision, 220),
+    whyThisExists: compactText(frame?.whyThisExists || fallbackFrame.whyThisExists, 220),
+    cutLogic: compactText(frame?.cutLogic || fallbackFrame.cutLogic, 180),
+    contrastFromPrevious: normalizeContrastText(
+      frame?.contrastFromPrevious,
+      fallbackFrame.contrastFromPrevious
+    ),
+    shotType: compactText(frame?.shotType || fallbackFrame.shotType || 'Medium', 40),
+    transition: compactText(frame?.transition || fallbackFrame.transition || 'Cut', 40),
     imageUrl: null
   };
 }
 
-function normalizeStoryboard(raw, script) {
-  const fallback = buildFallbackStoryboard(script);
+function normalizeStressTest(stressTest, fallbackStressTest) {
+  return {
+    centralContrast: compactText(stressTest?.centralContrast || fallbackStressTest.centralContrast, 240),
+    powerShift: compactText(stressTest?.powerShift || fallbackStressTest.powerShift, 240),
+    sharpestMoment: compactText(stressTest?.sharpestMoment || fallbackStressTest.sharpestMoment, 160),
+    removableLine: compactText(stressTest?.removableLine || fallbackStressTest.removableLine, 180),
+    mutedVisualCheck: compactText(stressTest?.mutedVisualCheck || fallbackStressTest.mutedVisualCheck, 140),
+    scriptStatus: compactText(stressTest?.scriptStatus || fallbackStressTest.scriptStatus || 'usable', 20)
+  };
+}
+
+function normalizeStoryboard(raw, script, constraints = {}) {
+  const fallback = buildFallbackStoryboard(script, constraints);
+
   const sourceFrames = Array.isArray(raw?.frames)
     ? raw.frames
     : Array.isArray(raw?.storyboardFrames)
       ? raw.storyboardFrames
       : [];
 
-  const frames = Array.from({ length: TARGET_FRAME_COUNT }, (_, index) =>
-    normalizeFrame(sourceFrames[index], fallback.frames[index], script, index)
+  const clippedFrames = sourceFrames.slice(0, TARGET_MAX_BEATS);
+  const normalizedFrames = clippedFrames.map((frame, index) =>
+    normalizeFrame(frame, fallback.frames[index], index)
   );
 
+  while (normalizedFrames.length < 3) {
+    const index = normalizedFrames.length;
+    normalizedFrames.push(normalizeFrame({}, fallback.frames[index], index));
+  }
+
+  const frames = normalizedFrames.slice(0, TARGET_MAX_BEATS);
+  frames.forEach((frame, index) => {
+    frame.frameNumber = index + 1;
+    frame.timing = FRAME_TIMINGS[index] || frame.timing;
+    frame.transition = index === frames.length - 1 ? 'Fade out' : 'Cut';
+  });
+
+  const stressTest = normalizeStressTest(raw?.stressTest || {}, fallback.stressTest);
+
   return {
-    title: raw?.title || fallback.title,
-    summary: raw?.summary || fallback.summary,
-    tone: raw?.tone || fallback.tone,
+    projectName: safeProjectName(raw?.projectName || fallback.projectName),
+    title: compactText(raw?.title || fallback.title, 120),
+    summary: compactText(raw?.summary || fallback.summary, 260),
+    tone: compactText(raw?.tone || fallback.tone, 120),
+    stressTest,
+    rewriteApplied: Boolean(raw?.rewriteApplied),
+    rewriteExcerpt: compactText(raw?.rewriteExcerpt || '', 260),
     frames
   };
 }
 
-async function createMessage(anthropic, prompt, maxTokens = 2300) {
-  const result = await withTimeout(
+async function createStoryboardMessage(anthropic, prompt) {
+  const { response, model } = await withTimeout(
     createMessageWithFallback(anthropic, {
-      max_tokens: maxTokens,
+      max_tokens: 1800,
+      temperature: 0.8,
       messages: [{ role: 'user', content: prompt }]
     }),
     ANTHROPIC_TIMEOUT_MS
   );
 
-  return result.response;
+  return { response, model };
 }
 
-function extractJsonObject(text) {
-  const match = String(text || '').match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON object found');
-  return JSON.parse(match[0]);
+function buildPrompt(script, constraints, projectName) {
+  const constraintsEnabled = hasBrandConstraints(constraints);
+
+  const constraintsBlock = constraintsEnabled
+    ? `BRAND / TONAL CONSTRAINTS (MANDATORY):\n${JSON.stringify(constraints, null, 2)}`
+    : 'BRAND / TONAL CONSTRAINTS: none provided. Proceed narrative-first and avoid product-category assumptions.';
+
+  return `GLOBAL RULE
+You are a director, not a formatter.
+Do not protect weak writing.
+Do not generate coverage.
+Do not restate the script.
+Only visualize change.
+If nothing changes, merge or delete.
+
+SCRIPT:
+${script}
+
+PROJECT NAME:
+${projectName || 'Project'}
+
+${constraintsBlock}
+
+Run this sequence strictly:
+
+PHASE 1 — SCRIPT STRESS TEST (mandatory):
+1) central contrast
+2) power shift
+3) sharpest moment
+4) one removable line
+5) if muted, does visual arc still read
+If contrast is weak or power shift is unclear, rewrite the weak section before storyboarding.
+
+PHASE 2 — REDUCE THE STORY:
+Select no more than ${TARGET_MAX_BEATS} beats.
+Each beat must cause transformation via power shift, tone shift, or visual escalation.
+Merge redundant beats.
+
+PHASE 3 — COMMIT TO VISUAL DECISIONS:
+For each beat return: beat, purpose, visualDecision, whyThisExists, cutLogic, contrastFromPrevious.
+No dialogue duplication. No script anchors. No emotional labels. No alternatives. No "could be".
+
+CONTRAST RULE:
+Each frame must explicitly differ from the previous frame in at least one of: composition, camera stability, distance, lighting, rhythm.
+
+FILLER ELIMINATION:
+No reaction shots without tonal shift.
+No dialogue continuation frames.
+No redundant escalation.
+Only film transformation.
+
+QUALITY CONTROL BEFORE OUTPUT:
+- most important moment is visually dominant
+- power shift is clear
+- contrast progression is clear
+- muted arc is readable
+- no frame exists only because a line exists
+
+Return ONLY valid JSON object with this schema:
+{
+  "projectName": "${safeProjectName(projectName || 'Project')}",
+  "title": "string",
+  "summary": "string",
+  "tone": "string",
+  "stressTest": {
+    "centralContrast": "string",
+    "powerShift": "string",
+    "sharpestMoment": "string",
+    "removableLine": "string",
+    "mutedVisualCheck": "Pass|Fail + short reason",
+    "scriptStatus": "usable|rewritten"
+  },
+  "rewriteApplied": true,
+  "rewriteExcerpt": "string",
+  "frames": [
+    {
+      "frameNumber": 1,
+      "timing": "0:00-0:06",
+      "beat": "string",
+      "purpose": "string",
+      "visualDecision": "string",
+      "whyThisExists": "string",
+      "cutLogic": "string",
+      "contrastFromPrevious": "string",
+      "shotType": "Wide|Medium|Close-up|Tracking|POV|Over-Shoulder",
+      "transition": "Cut|Match Cut|Smash Cut|Dissolve|Fade out"
+    }
+  ]
+}
+
+Hard output rules:
+- frames length must be 3 to ${TARGET_MAX_BEATS}
+- no markdown
+- no comments
+- no extra keys
+- concise, production-usable language only.`;
 }
 
 export default async (req) => {
@@ -285,8 +434,12 @@ export default async (req) => {
       });
     }
 
-    const { script } = await req.json();
-    if (!script || script.trim().length < 80) {
+    const body = await req.json();
+    const script = String(body?.script || '');
+    const projectName = safeProjectName(body?.projectName || 'Project');
+    const constraints = normalizeBrandConstraints(body?.constraints);
+
+    if (script.trim().length < 80) {
       return new Response(JSON.stringify({ error: 'Script must be at least 80 characters.' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
@@ -294,18 +447,23 @@ export default async (req) => {
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const beatAnchors = buildBeatAnchors(script);
-
-    const prompt = `You are a senior director + storyboard artist.\n\nSCRIPT:\n${script}\n\nBEAT_ANCHORS (JSON, chronological):\n${JSON.stringify(beatAnchors)}\n\nReturn ONLY valid JSON object with keys:\n- title\n- summary\n- tone\n- frames (array of exactly 8 objects)\n\nEach frame must map to the same beatNumber and include:\n- frameNumber\n- timing\n- shotType\n- storyFunction\n- intent (why this camera/staging choice helps the story)\n- emotionalObjective (what audience should feel)\n- visual\n- action\n- audio\n- dialogue\n- scriptAnchor\n- transition\n\nHard rules:\n- Keep chronology exactly aligned to BEAT_ANCHORS order\n- scriptAnchor must be a direct quote or faithful excerpt from its beat\n- Avoid generic placeholders and vague language\n- Make each shot intentional, specific, and production-usable\n- Do not invent unrelated events\n- 8 frames exactly.`;
+    const prompt = buildPrompt(script, constraints, projectName);
 
     let parsed;
+    let modelUsed;
     try {
-      const message = await createMessage(anthropic, prompt, 2500);
-      parsed = extractJsonObject(message.content?.[0]?.text || '');
+      const modelResult = await createStoryboardMessage(anthropic, prompt);
+      modelUsed = modelResult.model;
+      parsed = extractJsonObject(modelResult.response?.content?.[0]?.text || '');
     } catch (error) {
       if (error.message === TIMEOUT_ERROR) {
-        const storyboard = buildFallbackStoryboard(script);
-        return new Response(JSON.stringify({ storyboard, fallback: true, partial: true, fallbackReason: 'timeout' }), {
+        const storyboard = buildFallbackStoryboard(script, constraints);
+        return new Response(JSON.stringify({
+          storyboard,
+          fallback: true,
+          partial: true,
+          fallbackReason: 'timeout'
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -313,9 +471,13 @@ export default async (req) => {
       throw error;
     }
 
-    const storyboard = normalizeStoryboard(parsed, script);
+    const storyboard = normalizeStoryboard(parsed, script, constraints);
 
-    return new Response(JSON.stringify({ storyboard, qualityPipeline: 'beat-anchors+intent' }), {
+    return new Response(JSON.stringify({
+      storyboard,
+      qualityPipeline: 'director-guardrails-v3',
+      modelUsed
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });

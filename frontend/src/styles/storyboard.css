@@ -95,6 +95,45 @@ body {
   line-height: 1.5;
 }
 
+.ssb-input {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--ssb-border);
+  background: rgba(6, 11, 20, 0.9);
+  color: var(--ssb-text);
+  padding: 12px 14px;
+  font-size: 14px;
+}
+
+.ssb-constraints-head {
+  margin-top: 14px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--ssb-accent-2);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ssb-constraints-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.ssb-constraints-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ssb-muted);
+}
+
+.ssb-constraints-grid textarea {
+  min-height: 84px;
+  font-size: 12px;
+  padding: 10px;
+}
+
 .ssb-toolbar {
   margin-top: 10px;
   display: flex;
@@ -150,6 +189,36 @@ body {
   text-align: right;
   color: var(--ssb-muted);
   font-size: 13px;
+}
+
+.ssb-stress-grid {
+  margin: 14px 0 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px 12px;
+  color: #bfd0ea;
+  font-size: 13px;
+}
+
+.ssb-stress-grid strong {
+  color: #f1f6ff;
+}
+
+.ssb-export-row {
+  margin-top: 12px;
+  margin-bottom: 12px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.ssb-download {
+  color: var(--ssb-accent-2);
+  text-decoration: none;
+  border: 1px solid var(--ssb-border);
+  border-radius: 10px;
+  padding: 8px 12px;
 }
 
 .ssb-grid {
