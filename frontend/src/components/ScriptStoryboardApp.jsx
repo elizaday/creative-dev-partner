@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-const SCRIPT_RETRY_ATTEMPTS = 3;
+const SCRIPT_RETRY_ATTEMPTS = 2;
 const SCRIPT_RETRY_DELAY_MS = 1200;
 const IMAGE_CONCURRENCY = 2;
 
@@ -34,17 +34,22 @@ async function callApi(url, body) {
 }
 
 async function callWithQualityRetry(url, body, onRetry) {
+  let lastFallbackData = null;
+
   for (let attempt = 1; attempt <= SCRIPT_RETRY_ATTEMPTS; attempt += 1) {
     const data = await callApi(url, body);
-    if (!data.fallback) return data;
+    if (!data.fallback) return { ...data, qualityDegraded: false };
+    lastFallbackData = data;
 
     if (attempt < SCRIPT_RETRY_ATTEMPTS) {
       onRetry?.(attempt + 1, SCRIPT_RETRY_ATTEMPTS);
       await wait(SCRIPT_RETRY_DELAY_MS * attempt);
       continue;
     }
+  }
 
-    throw new Error('High-quality storyboard generation is still warming up. Please run again.');
+  if (lastFallbackData) {
+    return { ...lastFallbackData, qualityDegraded: true, qualityRetriesExhausted: true };
   }
 
   throw new Error('Unable to complete storyboard generation.');
@@ -55,6 +60,7 @@ export default function ScriptStoryboardApp() {
   const [loading, setLoading] = useState(false);
   const [loadingText, setLoadingText] = useState('');
   const [error, setError] = useState(null);
+  const [warning, setWarning] = useState(null);
 
   const [storyboard, setStoryboard] = useState(null);
   const [imageStats, setImageStats] = useState({ total: 0, done: 0, running: false });
@@ -73,6 +79,7 @@ export default function ScriptStoryboardApp() {
     setLoading(true);
     setLoadingText('Breaking script into storyboard beats...');
     setError(null);
+    setWarning(null);
 
     try {
       const data = await callWithQualityRetry('/api/script-storyboard', { script }, (attempt, max) => {
@@ -80,6 +87,9 @@ export default function ScriptStoryboardApp() {
       });
 
       setStoryboard(data.storyboard);
+      if (data.qualityDegraded) {
+        setWarning('Showing fallback storyboard because high-quality alignment timed out. You can still generate images, then retry for a stronger pass.');
+      }
       setGenerationRunId((prev) => prev + 1);
     } catch (err) {
       setError(err.message);
@@ -180,6 +190,7 @@ export default function ScriptStoryboardApp() {
           </button>
         </div>
         {loadingText && <p className="ssb-status">{loadingText}</p>}
+        {warning && <p className="ssb-status">{warning}</p>}
         {error && <p className="ssb-error">{error}</p>}
       </section>
 

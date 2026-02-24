@@ -5,7 +5,7 @@ import Variations from './components/Variations';
 import FinalConcepts from './components/FinalConcepts';
 import LoadingState from './components/LoadingState';
 
-const QUALITY_RETRY_ATTEMPTS = 3;
+const QUALITY_RETRY_ATTEMPTS = 2;
 const QUALITY_RETRY_DELAY_MS = 1200;
 
 function App() {
@@ -67,19 +67,25 @@ function App() {
       onRetry = () => {}
     } = options;
 
+    let lastFallbackData = null;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const data = await callApi(url, body);
       if (!data.fallback) {
-        return data;
+        return { ...data, qualityDegraded: false };
       }
+
+      lastFallbackData = data;
 
       if (attempt < maxAttempts) {
         onRetry(attempt + 1, maxAttempts);
         await wait(retryDelayMs * attempt);
         continue;
       }
+    }
 
-      throw new Error('High-quality generation is still warming up. Please run this step again.');
+    if (lastFallbackData) {
+      return { ...lastFallbackData, qualityDegraded: true, qualityRetriesExhausted: true };
     }
 
     throw new Error('Unable to complete quality generation.');
@@ -101,6 +107,9 @@ function App() {
         }
       });
       setIdeas(data.ideas);
+      if (data.qualityDegraded) {
+        setError('Showing fallback ideas because high-quality generation timed out. You can continue, then retry later for higher-quality output.');
+      }
       setPhase(2);
     } catch (err) {
       setError(err.message);
@@ -127,6 +136,9 @@ function App() {
         }
       });
       setVariations(data.variations);
+      if (data.qualityDegraded) {
+        setError('Showing fallback variations because high-quality generation timed out. You can continue, then retry this step for richer diversity.');
+      }
       setPhase(3);
     } catch (err) {
       setError(err.message);
@@ -151,6 +163,9 @@ function App() {
         }
       });
       setFinalConcepts(data.concepts);
+      if (data.qualityDegraded) {
+        setError('Showing fallback final concepts because high-quality generation timed out. You can continue and regenerate this step later.');
+      }
       setPhase(4);
     } catch (err) {
       setError(err.message);
