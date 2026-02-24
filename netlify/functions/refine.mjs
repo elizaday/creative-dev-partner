@@ -1,17 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
 
-const MODEL = 'claude-3-5-haiku-latest';
 const ANTHROPIC_TIMEOUT_MS = 12000;
-const TIMEOUT_ERROR = 'ANTHROPIC_TIMEOUT';
-
-function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(TIMEOUT_ERROR)), ms);
-    })
-  ]);
-}
 
 function buildFallbackRefinedConcept(concept, feedback) {
   if (!concept || typeof concept !== 'object') {
@@ -67,14 +57,14 @@ Return ONLY the JSON object, no other text.`;
 
     let message;
     try {
-      message = await withTimeout(
-        anthropic.messages.create({
-          model: MODEL,
+      const result = await withTimeout(
+        createMessageWithFallback(anthropic, {
           max_tokens: 900,
           messages: [{ role: 'user', content: prompt }]
         }),
         ANTHROPIC_TIMEOUT_MS
       );
+      message = result.response;
     } catch (error) {
       if (error.message === TIMEOUT_ERROR) {
         return new Response(JSON.stringify({ concept: buildFallbackRefinedConcept(concept, feedback), fallback: true, partial: true }), {

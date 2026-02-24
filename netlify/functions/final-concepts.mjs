@@ -1,8 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
 
-const MODEL = 'claude-3-5-haiku-latest';
 const ANTHROPIC_TIMEOUT_MS = 12000;
-const TIMEOUT_ERROR = 'ANTHROPIC_TIMEOUT';
 const TARGET_FRAME_COUNT = 8;
 const FRAME_TIMINGS = [
   '0:00-0:04',
@@ -14,15 +13,6 @@ const FRAME_TIMINGS = [
   '0:24-0:27',
   '0:27-0:30'
 ];
-
-function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(TIMEOUT_ERROR)), ms);
-    })
-  ]);
-}
 
 function buildPlaceholderFrame(frameIndex, seedText = '') {
   const frameNumber = frameIndex + 1;
@@ -154,14 +144,14 @@ export default async (req) => {
 
     let message;
     try {
-      message = await withTimeout(
-        anthropic.messages.create({
-          model: MODEL,
+      const result = await withTimeout(
+        createMessageWithFallback(anthropic, {
           max_tokens: 1600,
           messages: [{ role: 'user', content: prompt }]
         }),
         ANTHROPIC_TIMEOUT_MS
       );
+      message = result.response;
     } catch (error) {
       if (error.message === TIMEOUT_ERROR) {
         const concepts = fallbackConceptsFromVariations(selectedVariations);
