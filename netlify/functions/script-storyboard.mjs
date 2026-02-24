@@ -115,8 +115,20 @@ function parseScriptLines(script) {
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
 
-  const sentenceChunks = normalized
+  const protectedText = normalized
+    .replace(/\bINT\.\s*/g, 'INT§ ')
+    .replace(/\bEXT\.\s*/g, 'EXT§ ')
+    .replace(/\bEST\.\s*/g, 'EST§ ')
+    .replace(/\bINT\/EXT\.\s*/g, 'INTEXT§ ');
+
+  const sentenceChunks = protectedText
     .split(/(?<=[.!?])\s+(?=[A-Z0-9])/g)
+    .map((line) => line
+      .replace(/INT§/g, 'INT.')
+      .replace(/EXT§/g, 'EXT.')
+      .replace(/EST§/g, 'EST.')
+      .replace(/INTEXT§/g, 'INT/EXT.')
+    )
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
 
