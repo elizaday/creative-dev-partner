@@ -1,121 +1,407 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
+import { TIMEOUT_ERROR, withTimeout } from './_anthropic.mjs';
 
-const ANTHROPIC_TIMEOUT_MS = 22000;
 const TARGET_IDEA_COUNT = 10;
+const JOB_VERSION = 1;
+const START_MODE = 'start';
+const POLL_MODE = 'poll';
 
-function extractJsonArray(text) {
-  const match = String(text || '').match(/\[[\s\S]*\]/);
-  if (!match) throw new Error('No JSON array found');
-  return JSON.parse(match[0]);
+const IDEAS_PRIMARY_TIMEOUT_MS = 17000;
+const IDEAS_RESCUE_TIMEOUT_MS = 13000;
+const IDEAS_PRIMARY_MAX_TOKENS = 1900;
+const IDEAS_RESCUE_MAX_TOKENS = 1300;
+
+const STAGE_PLANS = [
+  {
+    key: 'strategic-safe',
+    label: 'Generating strategic concepts',
+    detail: 'Pass 1/4 - practical but differentiated directions',
+    count: 4,
+    laneInstruction: 'Focus on high-confidence concepts that are strategically tight and directly aligned to the brief goals and constraints.'
+  },
+  {
+    key: 'bold-differentiated',
+    label: 'Generating bold concepts',
+    detail: 'Pass 2/4 - category-breaking but feasible directions',
+    count: 4,
+    laneInstruction: 'Focus on bold differentiation with non-obvious creative mechanisms while staying production-feasible.'
+  },
+  {
+    key: 'unexpected-wildcard',
+    label: 'Generating wildcard concepts',
+    detail: 'Pass 3/4 - unconventional approaches with clear strategic logic',
+    count: 4,
+    laneInstruction: 'Focus on surprising execution formats and narrative structures that still serve the brief objective.'
+  }
+];
+
+const SONNET_DEFAULT_MODELS = [
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-20250514',
+  'claude-3-7-sonnet-20250219',
+  'claude-3-5-sonnet-20241022'
+];
+
+function parseModelList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => item.toLowerCase().includes('sonnet'));
 }
 
-function buildFallbackIdeas() {
-  const templates = [
-    ['The Honest Demo', 'Show the product doing one thing exceptionally well.', 'Confident', 'Documentary', 'Safe'],
-    ['Before and After', 'Contrast life without the product vs life with it.', 'Practical', 'Lifestyle', 'Safe'],
-    ['Tiny Moment Twist', 'A normal moment gets unexpectedly better because of the product.', 'Wry', 'Cinematic', 'Medium'],
-    ['Expert Breakdown', 'An expert dissects why this solution quietly outperforms.', 'Authoritative', 'Studio', 'Safe'],
-    ['Street Reactions', 'Real people discover and react to the value in real time.', 'Human', 'Handheld', 'Medium'],
-    ['One Day Story', 'Follow one person through a day transformed by this product.', 'Emotional', 'Narrative', 'Medium'],
-    ['Myth vs Reality', 'Debunk category myths and land on clear proof.', 'Direct', 'Graphic-led', 'Medium'],
-    ['Future Snapshot', 'Project where this category is heading and why this leads.', 'Aspirational', 'Futuristic', 'Bold'],
-    ['Minimal Hero', 'Stripped-back product film with sharp writing and confidence.', 'Premium', 'Minimal', 'Safe'],
-    ['Three Use Cases', 'Rapid vignettes prove versatility across scenarios.', 'Energetic', 'Montage', 'Medium']
-  ];
+function getIdeaModelPlan() {
+  const envPreferred = parseModelList(process.env.ANTHROPIC_IDEA_MODELS);
+  if (envPreferred.length > 0) {
+    return [...new Set([...envPreferred, ...SONNET_DEFAULT_MODELS])];
+  }
+  return SONNET_DEFAULT_MODELS;
+}
 
-  return templates.map((t, idx) => ({
-    id: idx + 1,
-    title: t[0],
-    hook: t[1],
-    description: `${t[1]} Keep the message simple, specific, and visually clear.`,
-    insight: 'Use a clear human truth that reframes category expectations.',
-    whyItWorks: 'It ties the core benefit to a concrete behavioral moment and gives production a clear execution path.',
-    tags: { tone: t[2], visual: t[3], risk: t[4] },
-    scenes: [
-      'Opening: Establish context and tension quickly.',
-      'Build: Introduce product interaction and key benefit.',
-      'Turn: Deliver the proof moment or unexpected payoff.',
-      'Resolution: Land tagline and clear brand takeaway.'
-    ],
-    scores: {
-      originality: 6,
-      briefFit: 7,
-      clarity: 8,
-      feasibility: 8,
-      distinctiveness: 6,
-      overall: 7
-    }
-  }));
+function normalizeWhitespace(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function compactText(value, maxLen = 500) {
+  const text = normalizeWhitespace(value);
+  if (!text) return '';
+  return text.length <= maxLen ? text : `${text.slice(0, maxLen - 1)}…`;
+}
+
+function isModelNotFoundError(error) {
+  const status = error?.status ?? error?.statusCode;
+  const message = String(error?.message || '');
+  return status === 404 || message.includes('not_found_error') || message.includes('model:');
+}
+
+function isRetryableModelError(error) {
+  const status = error?.status ?? error?.statusCode;
+  return [408, 409, 429, 500, 502, 503, 504, 529].includes(status);
+}
+
+function extractJsonArray(text) {
+  const source = String(text || '').trim();
+  if (!source) throw new Error('No response text');
+
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    const parsed = JSON.parse(fenced[1]);
+    if (!Array.isArray(parsed)) throw new Error('Expected JSON array in fenced block');
+    return parsed;
+  }
+
+  if (source.startsWith('[')) {
+    const parsed = JSON.parse(source);
+    if (!Array.isArray(parsed)) throw new Error('Expected JSON array');
+    return parsed;
+  }
+
+  const start = source.indexOf('[');
+  const end = source.lastIndexOf(']');
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('No JSON array found in model response');
+  }
+
+  const parsed = JSON.parse(source.slice(start, end + 1));
+  if (!Array.isArray(parsed)) throw new Error('Expected JSON array after extraction');
+  return parsed;
 }
 
 function normalizeScenes(scenes = []) {
-  const safe = Array.isArray(scenes) ? scenes.filter(Boolean).slice(0, 4) : [];
-  while (safe.length < 4) {
-    safe.push('Beat: Advance the narrative toward a clear brand payoff.');
+  const clean = Array.isArray(scenes)
+    ? scenes.map((item) => compactText(item, 120)).filter(Boolean).slice(0, 4)
+    : [];
+
+  while (clean.length < 4) {
+    clean.push('Advance the narrative with a concrete strategic shift.');
   }
-  return safe;
+
+  return clean;
 }
 
-function normalizeIdea(idea, index) {
-  const title = idea?.title || `Concept ${index + 1}`;
-  const description = idea?.description || 'Clear, brief-fit concept with a distinct execution angle.';
-  const hook = idea?.hook || `${title} turns the brief into a specific, memorable story.`;
-  const scores = idea?.scores || {};
+function clampScore(value, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(1, Math.min(10, Math.round(num)));
+}
+
+function normalizeIdea(rawIdea, index) {
+  const scores = rawIdea?.scores || {};
+  const description = compactText(rawIdea?.description, 420);
+  const insight = compactText(rawIdea?.insight, 180);
+  const whyItWorks = compactText(rawIdea?.whyItWorks, 200);
 
   return {
     id: index + 1,
-    title,
-    hook,
-    description,
-    insight: idea?.insight || 'Anchor the concept in a specific audience tension from the brief.',
-    whyItWorks: idea?.whyItWorks || 'It connects message clarity with a distinct creative mechanism.',
+    title: compactText(rawIdea?.title, 80) || `Concept ${index + 1}`,
+    hook: compactText(rawIdea?.hook, 140) || 'Distinct creative mechanism aligned to the brief objective.',
+    description: description || 'Strategic concept with a clear execution path and audience payoff.',
+    insight: insight || 'Built on a specific audience tension tied to the brief.',
+    whyItWorks: whyItWorks || 'Connects audience truth, execution clarity, and brand objective.',
     tags: {
-      tone: idea?.tags?.tone || 'Balanced',
-      visual: idea?.tags?.visual || 'Cinematic',
-      risk: idea?.tags?.risk || 'Medium'
+      tone: compactText(rawIdea?.tags?.tone, 40) || 'Balanced',
+      visual: compactText(rawIdea?.tags?.visual, 40) || 'Cinematic',
+      risk: compactText(rawIdea?.tags?.risk, 20) || 'Medium'
     },
-    scenes: normalizeScenes(idea?.scenes),
+    scenes: normalizeScenes(rawIdea?.scenes),
     scores: {
-      originality: Number(scores.originality || 7),
-      briefFit: Number(scores.briefFit || 8),
-      clarity: Number(scores.clarity || 8),
-      feasibility: Number(scores.feasibility || 7),
-      distinctiveness: Number(scores.distinctiveness || 8),
-      overall: Number(scores.overall || 8)
+      originality: clampScore(scores.originality, 8),
+      briefFit: clampScore(scores.briefFit, 8),
+      clarity: clampScore(scores.clarity, 8),
+      feasibility: clampScore(scores.feasibility, 7),
+      distinctiveness: clampScore(scores.distinctiveness, 8),
+      overall: clampScore(scores.overall, 8)
     }
   };
 }
 
-function normalizeTopIdeas(ideas) {
-  const list = Array.isArray(ideas) ? ideas : [];
+function dedupeByTitle(list) {
   const seen = new Set();
   const deduped = [];
 
-  for (const item of list) {
-    const key = String(item?.title || '').trim().toLowerCase();
+  for (const item of Array.isArray(list) ? list : []) {
+    const key = normalizeWhitespace(item?.title).toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
     deduped.push(item);
   }
 
-  while (deduped.length < TARGET_IDEA_COUNT) {
-    deduped.push(buildFallbackIdeas()[deduped.length]);
-  }
-
-  return deduped.slice(0, TARGET_IDEA_COUNT).map((idea, idx) => normalizeIdea(idea, idx));
+  return deduped;
 }
 
-async function createMessage(anthropic, prompt, maxTokens = 2000) {
-  const result = await withTimeout(
-    createMessageWithFallback(anthropic, {
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }]
-    }),
-    ANTHROPIC_TIMEOUT_MS
-  );
+function materializeIdeas(curated, candidates) {
+  const dedupedCurated = dedupeByTitle(curated);
+  const dedupedCandidates = dedupeByTitle(candidates);
 
-  return result.response;
+  const combined = [...dedupedCurated];
+  const usedKeys = new Set(combined.map((item) => normalizeWhitespace(item?.title).toLowerCase()));
+
+  for (const candidate of dedupedCandidates) {
+    const key = normalizeWhitespace(candidate?.title).toLowerCase();
+    if (!key || usedKeys.has(key)) continue;
+    combined.push(candidate);
+    usedKeys.add(key);
+    if (combined.length >= TARGET_IDEA_COUNT) break;
+  }
+
+  if (combined.length < TARGET_IDEA_COUNT) {
+    throw new Error('Insufficient unique high-quality ideas generated. Please retry.');
+  }
+
+  return combined.slice(0, TARGET_IDEA_COUNT).map((idea, index) => normalizeIdea(idea, index));
+}
+
+function createEmptyJob(brief) {
+  return {
+    version: JOB_VERSION,
+    brief: compactText(brief, 7000),
+    stageIndex: 0,
+    candidates: [],
+    createdAt: new Date().toISOString(),
+    pollCount: 0
+  };
+}
+
+function validateJob(job, briefFromBody = '') {
+  if (!job || typeof job !== 'object') {
+    throw new Error('Missing ideas job payload.');
+  }
+
+  if (Number(job.version) !== JOB_VERSION) {
+    throw new Error('Ideas job version mismatch. Please restart generation.');
+  }
+
+  const brief = compactText(job.brief || briefFromBody, 7000);
+  if (!brief || brief.length < 50) {
+    throw new Error('Ideas job brief is invalid. Please restart generation.');
+  }
+
+  const stageIndex = Number.isInteger(job.stageIndex) ? job.stageIndex : Number(job.stageIndex || 0);
+  const safeStageIndex = Number.isFinite(stageIndex) ? Math.max(0, Math.min(STAGE_PLANS.length, stageIndex)) : 0;
+
+  return {
+    ...job,
+    version: JOB_VERSION,
+    brief,
+    stageIndex: safeStageIndex,
+    pollCount: Number(job.pollCount || 0),
+    candidates: Array.isArray(job.candidates) ? job.candidates.slice(0, 30) : []
+  };
+}
+
+async function createIdeasMessage(anthropic, prompt, options = {}) {
+  const {
+    maxTokens = IDEAS_PRIMARY_MAX_TOKENS,
+    temperature = 0.7
+  } = options;
+
+  const models = getIdeaModelPlan();
+  let lastError = null;
+
+  for (let index = 0; index < models.length; index += 1) {
+    const model = models[index];
+    const isPrimary = index === 0;
+    const timeoutMs = isPrimary ? IDEAS_PRIMARY_TIMEOUT_MS : IDEAS_RESCUE_TIMEOUT_MS;
+    const tokenCap = isPrimary ? maxTokens : Math.min(maxTokens, IDEAS_RESCUE_MAX_TOKENS);
+
+    try {
+      const response = await withTimeout(
+        anthropic.messages.create({
+          model,
+          max_tokens: tokenCap,
+          temperature,
+          messages: [{ role: 'user', content: prompt }]
+        }),
+        timeoutMs
+      );
+
+      return { response, model };
+    } catch (error) {
+      lastError = error;
+      if (error.message === TIMEOUT_ERROR || isModelNotFoundError(error) || isRetryableModelError(error)) {
+        console.warn(`Ideas model failed (${model}): ${error.message}. Trying next model.`);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error('No Sonnet model available for ideas generation.');
+}
+
+function buildStagePrompt(brief, stage, existingCandidates) {
+  const usedTitles = dedupeByTitle(existingCandidates)
+    .map((item) => normalizeWhitespace(item?.title))
+    .filter(Boolean)
+    .slice(0, 20);
+
+  return `You are an elite creative director.
+
+CLIENT BRIEF:\n${brief}
+
+Current lane: ${stage.key}
+Lane instruction: ${stage.laneInstruction}
+
+Already generated titles (do not repeat):\n${JSON.stringify(usedTitles)}
+
+Generate EXACTLY ${stage.count} concepts as a JSON array.
+Each concept must include:
+- title (3-7 words)
+- hook (max 18 words)
+- insight (one sharp audience truth)
+- description (3-5 concrete sentences, no fluff)
+- whyItWorks (1-2 sentences, strategic reason)
+- tags { tone, visual, risk }
+- scenes (exactly 4 beats: opening, build, turn, resolution)
+- scores { originality, briefFit, clarity, feasibility, distinctiveness, overall }
+
+Rules:
+- Do not produce cosmetic rewrites.
+- Each concept must have a distinct mechanism.
+- Avoid generic ad language.
+- Keep concepts production-realistic.
+
+Return ONLY valid JSON array.`;
+}
+
+function buildCurationPrompt(brief, candidates) {
+  return `You are a creative quality board.
+
+CLIENT BRIEF:\n${brief}
+
+CANDIDATE CONCEPTS JSON:\n${JSON.stringify(candidates)}
+
+Task:
+Select and rewrite the best ${TARGET_IDEA_COUNT} concepts into final output.
+
+Output format:
+Return ONLY a JSON array of exactly ${TARGET_IDEA_COUNT} objects with fields:
+- title
+- hook
+- insight
+- description
+- whyItWorks
+- tags { tone, visual, risk }
+- scenes (exactly 4)
+- scores { originality, briefFit, clarity, feasibility, distinctiveness, overall }
+
+Selection rules:
+- maximize strategic quality and diversity
+- no duplicate mechanisms
+- preserve feasibility
+- remove weak or generic concepts
+- keep safe-to-bold spread
+
+Return valid JSON array only.`;
+}
+
+function stageProgress(stageIndex) {
+  const total = STAGE_PLANS.length + 1;
+
+  if (stageIndex < STAGE_PLANS.length) {
+    const stage = STAGE_PLANS[stageIndex];
+    return {
+      step: stageIndex + 1,
+      total,
+      label: stage.label,
+      detail: stage.detail
+    };
+  }
+
+  return {
+    step: total,
+    total,
+    label: 'Curating final 10 ideas',
+    detail: 'Pass 4/4 - selecting strongest diverse final set'
+  };
+}
+
+function isJobRetryableError(error) {
+  return error?.message === TIMEOUT_ERROR || isRetryableModelError(error) || isModelNotFoundError(error);
+}
+
+async function runIdeasJobStep(anthropic, job) {
+  const safeJob = validateJob(job);
+  const progress = stageProgress(safeJob.stageIndex);
+
+  if (safeJob.stageIndex < STAGE_PLANS.length) {
+    const stage = STAGE_PLANS[safeJob.stageIndex];
+    const prompt = buildStagePrompt(safeJob.brief, stage, safeJob.candidates);
+    const result = await createIdeasMessage(anthropic, prompt, { maxTokens: 1200, temperature: 0.85 });
+    const stageIdeas = extractJsonArray(result.response?.content?.[0]?.text || '');
+
+    const mergedCandidates = dedupeByTitle([
+      ...safeJob.candidates,
+      ...stageIdeas
+    ]);
+
+    const updatedJob = {
+      ...safeJob,
+      stageIndex: safeJob.stageIndex + 1,
+      candidates: mergedCandidates,
+      pollCount: safeJob.pollCount + 1
+    };
+
+    return {
+      status: 'processing',
+      job: updatedJob,
+      progress: stageProgress(updatedJob.stageIndex),
+      modelUsed: result.model
+    };
+  }
+
+  const curationPrompt = buildCurationPrompt(safeJob.brief, safeJob.candidates);
+  const curationResult = await createIdeasMessage(anthropic, curationPrompt, { maxTokens: IDEAS_PRIMARY_MAX_TOKENS, temperature: 0.55 });
+  const curated = extractJsonArray(curationResult.response?.content?.[0]?.text || '');
+  const ideas = materializeIdeas(curated, safeJob.candidates);
+
+  return {
+    status: 'completed',
+    ideas,
+    progress,
+    qualityPipeline: 'ideas-job-two-pass-sonnet-only',
+    modelUsed: curationResult.model
+  };
 }
 
 export default async (req) => {
@@ -134,51 +420,69 @@ export default async (req) => {
       });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const { brief } = await req.json();
+    const body = await req.json();
+    const mode = body?.mode || (body?.job ? POLL_MODE : START_MODE);
 
-    if (!brief || brief.trim().length < 50) {
-      return new Response(JSON.stringify({ error: 'Brief must be at least 50 characters' }), {
-        status: 400,
+    if (mode === START_MODE) {
+      const brief = compactText(body?.brief, 7000);
+      if (!brief || brief.length < 50) {
+        return new Response(JSON.stringify({ error: 'Brief must be at least 50 characters' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      const job = createEmptyJob(brief);
+      return new Response(JSON.stringify({
+        status: 'processing',
+        job,
+        progress: stageProgress(0),
+        qualityPipeline: 'ideas-job-two-pass-sonnet-only'
+      }), {
+        status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const prompt = `You are a world-class creative director.\n\nCLIENT BRIEF:\n${brief}\n\nTask:\nGenerate EXACTLY 10 high-quality creative directions.\n\nOutput format (JSON array only):\nEach item must include:\n- title (3-6 words)\n- hook (max 20 words)\n- insight (one sentence audience truth/tension this idea is built on)\n- description (3-5 sentences, thoughtful and specific)\n- whyItWorks (1-2 sentences explaining strategic reason this concept should perform)\n- tags { tone, visual, risk }\n- scenes (exactly 4 concise beats: opening, build, turn, resolution)\n- scores { originality, briefFit, clarity, feasibility, distinctiveness, overall }\n\nQuality rules:\n- ideas must be meaningfully different (not cosmetic variants)\n- range from safe to bold\n- each idea must explicitly connect to brief objectives and constraints\n- avoid generic ad cliches\n- each idea must have a clear execution mechanism, not just a theme\n\nScoring rules:\n- each score is integer 1-10\n- overall weighted toward originality + briefFit\n\nReturn ONLY valid JSON array with exactly 10 items.`;
+    if (mode === POLL_MODE) {
+      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      const job = validateJob(body?.job, body?.brief);
 
-    let ideas;
-    try {
-      const message = await createMessage(anthropic, prompt, 2100);
-      ideas = extractJsonArray(message.content?.[0]?.text || '');
-    } catch (error) {
-      if (error.message === TIMEOUT_ERROR) {
-        return new Response(JSON.stringify({
-          ideas: buildFallbackIdeas(),
-          fallback: true,
-          partial: true,
-          fallbackReason: 'timeout'
-        }), {
+      try {
+        const result = await runIdeasJobStep(anthropic, job);
+        return new Response(JSON.stringify(result), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
+      } catch (error) {
+        if (isJobRetryableError(error)) {
+          return new Response(JSON.stringify({
+            status: 'retry_required',
+            retryable: true,
+            message: 'High-quality generation timed out in this step. Poll again to continue.',
+            job,
+            progress: stageProgress(job.stageIndex)
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        throw error;
       }
-      throw error;
     }
 
-    return new Response(JSON.stringify({ ideas: normalizeTopIdeas(ideas), qualityPipeline: 'single-pass-scored' }), {
-      status: 200,
+    return new Response(JSON.stringify({ error: 'Unsupported mode. Use mode=start or mode=poll.' }), {
+      status: 400,
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
     console.error('Error generating ideas:', error);
     return new Response(JSON.stringify({
-      ideas: buildFallbackIdeas(),
-      fallback: true,
-      partial: true,
-      fallbackReason: 'error',
+      error: 'Failed to generate high-quality ideas',
       details: error.message
     }), {
-      status: 200,
+      status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
   }

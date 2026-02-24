@@ -7,6 +7,8 @@ import LoadingState from './components/LoadingState';
 
 const QUALITY_RETRY_ATTEMPTS = 1;
 const QUALITY_RETRY_DELAY_MS = 1200;
+const IDEAS_JOB_POLL_DELAY_MS = 900;
+const IDEAS_JOB_MAX_POLLS = 10;
 
 function App() {
   const [phase, setPhase] = useState(1);
@@ -94,22 +96,48 @@ function App() {
   const handleGenerateIdeas = async (briefText) => {
     setBrief(briefText);
     setLoading(true);
-    setLoadingMessage({ text: 'Analyzing brief...', subtext: 'Extracting key elements' });
+    setLoadingMessage({ text: 'Starting high-quality ideas job...', subtext: 'Queueing first creative pass' });
     setError(null);
 
     try {
-      const data = await callApiWithQualityRetry('/api/ideas', { brief: briefText }, {
-        onRetry: (attempt, maxAttempts) => {
+      let data = await callApi('/api/ideas', { mode: 'start', brief: briefText });
+      let polls = 0;
+      let retrySignals = 0;
+
+      while (data?.status !== 'completed') {
+        polls += 1;
+        if (polls > IDEAS_JOB_MAX_POLLS) {
+          throw new Error('Ideas job took too long. Please run again to continue high-quality generation.');
+        }
+
+        if (data?.status === 'retry_required') {
+          retrySignals += 1;
+          if (retrySignals > 4) {
+            throw new Error('High-quality ideas could not complete after multiple retries. Please try again.');
+          }
           setLoadingMessage({
-            text: 'Retrying for high-quality ideas...',
-            subtext: 'Trying one more quality pass'
+            text: 'Continuing high-quality ideas job...',
+            subtext: data?.message || 'Retrying current creative pass'
+          });
+        } else {
+          setLoadingMessage({
+            text: data?.progress?.label || 'Generating high-quality ideas...',
+            subtext: data?.progress?.detail || 'Running creative passes'
           });
         }
-      });
-      setIdeas(data.ideas);
-      if (data.qualityDegraded) {
-        setError('Showing fallback ideas because high-quality generation timed out. You can continue, then retry later for higher-quality output.');
+
+        await wait(IDEAS_JOB_POLL_DELAY_MS);
+        data = await callApi('/api/ideas', {
+          mode: 'poll',
+          job: data?.job
+        });
       }
+
+      if (!Array.isArray(data?.ideas) || data.ideas.length === 0) {
+        throw new Error('Ideas job completed without valid ideas output.');
+      }
+
+      setIdeas(data.ideas);
       setPhase(2);
     } catch (err) {
       setError(err.message);
