@@ -1,7 +1,15 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { TIMEOUT_ERROR, withTimeout, createMessageWithFallback } from './_anthropic.mjs';
+import { TIMEOUT_ERROR, withTimeout } from './_anthropic.mjs';
 
-const ANTHROPIC_TIMEOUT_MS = 28000;
+const BASE_PRIMARY_TIMEOUT_MS = 8500;
+const BASE_RESCUE_TIMEOUT_MS = 6500;
+const BASE_PRIMARY_MAX_TOKENS = 980;
+const BASE_RESCUE_MAX_TOKENS = 720;
+
+const UPGRADE_PRIMARY_TIMEOUT_MS = 7500;
+const UPGRADE_RESCUE_TIMEOUT_MS = 5500;
+const UPGRADE_PRIMARY_MAX_TOKENS = 900;
+const UPGRADE_RESCUE_MAX_TOKENS = 680;
 const TARGET_MAX_BEATS = 5;
 const FRAME_TIMINGS = [
   '0:00-0:06',
@@ -12,6 +20,55 @@ const FRAME_TIMINGS = [
 ];
 
 const CONTRAST_DIMENSIONS = ['composition', 'camera stability', 'distance', 'lighting', 'rhythm'];
+
+function parseModelList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getStoryboardBaseModelPlan() {
+  const envPreferred = parseModelList(process.env.ANTHROPIC_STORYBOARD_MODELS);
+  const defaults = [
+    'claude-3-5-haiku-20241022',
+    'claude-3-5-sonnet-20241022',
+    'claude-sonnet-4-20250514',
+    'claude-sonnet-4-6'
+  ];
+
+  if (envPreferred.length > 0) {
+    return [...new Set([...envPreferred, ...defaults])];
+  }
+
+  return defaults;
+}
+
+function getStoryboardUpgradeModelPlan() {
+  const envPreferred = parseModelList(process.env.ANTHROPIC_STORYBOARD_UPGRADE_MODELS);
+  const defaults = [
+    'claude-sonnet-4-6',
+    'claude-sonnet-4-20250514',
+    'claude-3-5-sonnet-20241022'
+  ];
+
+  if (envPreferred.length > 0) {
+    return [...new Set([...envPreferred, ...defaults])];
+  }
+
+  return defaults;
+}
+
+function isModelNotFoundError(error) {
+  const status = error?.status ?? error?.statusCode;
+  const message = String(error?.message || '');
+  return status === 404 || message.includes('not_found_error') || message.includes('model:');
+}
+
+function isRetryableModelError(error) {
+  const status = error?.status ?? error?.statusCode;
+  return [408, 409, 429, 500, 502, 503, 504, 529].includes(status);
+}
 
 function normalizeWhitespace(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
@@ -140,7 +197,7 @@ function buildFallbackFrame(beatNumber, unit, projectContext, index) {
   };
 }
 
-function buildFallbackStoryboard(script, constraints = {}) {
+function buildFallbackStoryboard(script, constraints = {}, projectName = 'Project') {
   const units = parseScriptUnits(script);
   const projectContext = units.map((unit) => unit.text).join(' ');
 
@@ -160,7 +217,7 @@ function buildFallbackStoryboard(script, constraints = {}) {
   };
 
   return {
-    projectName: safeProjectName('Project'),
+    projectName: safeProjectName(projectName),
     title: 'Director Storyboard',
     summary: 'Five high-contrast beats engineered around transformation, not coverage.',
     tone: constraints.toneRestrictions || 'Cinematic, decisive, contrast-forward',
@@ -307,17 +364,48 @@ function normalizeStoryboard(raw, script, constraints = {}) {
   };
 }
 
-async function createStoryboardMessage(anthropic, prompt) {
-  const { response, model } = await withTimeout(
-    createMessageWithFallback(anthropic, {
-      max_tokens: 1200,
-      temperature: 0.6,
-      messages: [{ role: 'user', content: prompt }]
-    }),
-    ANTHROPIC_TIMEOUT_MS
-  );
+async function createStoryboardMessage(anthropic, prompt, options = {}) {
+  const {
+    modelPlan = getStoryboardBaseModelPlan(),
+    primaryTimeoutMs = BASE_PRIMARY_TIMEOUT_MS,
+    rescueTimeoutMs = BASE_RESCUE_TIMEOUT_MS,
+    primaryMaxTokens = BASE_PRIMARY_MAX_TOKENS,
+    rescueMaxTokens = BASE_RESCUE_MAX_TOKENS,
+    temperature = 0.55
+  } = options;
 
-  return { response, model };
+  const models = Array.isArray(modelPlan) ? modelPlan : getStoryboardBaseModelPlan();
+  let lastError = null;
+
+  for (let index = 0; index < models.length; index += 1) {
+    const model = models[index];
+    const isPrimary = index === 0;
+    const timeoutMs = isPrimary ? primaryTimeoutMs : rescueTimeoutMs;
+    const maxTokens = isPrimary ? primaryMaxTokens : rescueMaxTokens;
+
+    try {
+      const response = await withTimeout(
+        anthropic.messages.create({
+          model,
+          max_tokens: maxTokens,
+          temperature,
+          messages: [{ role: 'user', content: prompt }]
+        }),
+        timeoutMs
+      );
+
+      return { response, model };
+    } catch (error) {
+      lastError = error;
+      if (error.message === TIMEOUT_ERROR || isModelNotFoundError(error) || isRetryableModelError(error)) {
+        console.warn(`Storyboard model failed (${model}): ${error.message}. Trying next model.`);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error('No storyboard model available.');
 }
 
 function buildPrompt(script, constraints, projectName) {
@@ -328,13 +416,7 @@ function buildPrompt(script, constraints, projectName) {
     ? `BRAND / TONAL CONSTRAINTS (MANDATORY):\n${JSON.stringify(constraints, null, 2)}`
     : 'BRAND / TONAL CONSTRAINTS: none provided. Proceed narrative-first and avoid product-category assumptions.';
 
-  return `GLOBAL RULE
-You are a director, not a formatter.
-Do not protect weak writing.
-Do not generate coverage.
-Do not restate the script.
-Only visualize change.
-If nothing changes, merge or delete.
+  return `You are a film director generating a transformation-first storyboard.
 
 SCRIPT:
 ${scriptForPrompt}
@@ -344,42 +426,21 @@ ${projectName || 'Project'}
 
 ${constraintsBlock}
 
-Run this sequence strictly:
+Process:
+1) Stress test script: centralContrast, powerShift, sharpestMoment, removableLine, mutedVisualCheck, scriptStatus.
+2) Compress to 3-${TARGET_MAX_BEATS} beats only.
+3) For each beat, commit one visual choice with clear cut logic.
 
-PHASE 1 — SCRIPT STRESS TEST (mandatory):
-1) central contrast
-2) power shift
-3) sharpest moment
-4) one removable line
-5) if muted, does visual arc still read
-If contrast is weak or power shift is unclear, rewrite the weak section before storyboarding.
+Rules:
+- Only visualize change.
+- No coverage frames.
+- No script restatement.
+- No alternatives.
+- No dialogue duplication.
+- Every frame must differ from previous in at least one: composition, camera stability, distance, lighting, rhythm.
+- Remove filler beats that do not change power or tone.
 
-PHASE 2 — REDUCE THE STORY:
-Select no more than ${TARGET_MAX_BEATS} beats.
-Each beat must cause transformation via power shift, tone shift, or visual escalation.
-Merge redundant beats.
-
-PHASE 3 — COMMIT TO VISUAL DECISIONS:
-For each beat return: beat, purpose, visualDecision, whyThisExists, cutLogic, contrastFromPrevious.
-No dialogue duplication. No script anchors. No emotional labels. No alternatives. No "could be".
-
-CONTRAST RULE:
-Each frame must explicitly differ from the previous frame in at least one of: composition, camera stability, distance, lighting, rhythm.
-
-FILLER ELIMINATION:
-No reaction shots without tonal shift.
-No dialogue continuation frames.
-No redundant escalation.
-Only film transformation.
-
-QUALITY CONTROL BEFORE OUTPUT:
-- most important moment is visually dominant
-- power shift is clear
-- contrast progression is clear
-- muted arc is readable
-- no frame exists only because a line exists
-
-Return ONLY valid JSON object with this schema:
+Return ONLY valid JSON object:
 {
   "projectName": "${safeProjectName(projectName || 'Project')}",
   "title": "string",
@@ -419,6 +480,40 @@ Hard output rules:
 - concise, production-usable language only.`;
 }
 
+function buildUpgradePrompt(baseStoryboard, script, constraints, projectName) {
+  const scriptForPrompt = compactText(script, 1200);
+  const constraintsEnabled = hasBrandConstraints(constraints);
+  const constraintsBlock = constraintsEnabled
+    ? JSON.stringify(constraints, null, 2)
+    : 'none';
+
+  return `Upgrade this storyboard draft to be more intentional and visually distinct.
+
+SCRIPT SUMMARY:
+${scriptForPrompt}
+
+PROJECT NAME:
+${projectName || 'Project'}
+
+CONSTRAINTS:
+${constraintsBlock}
+
+DRAFT STORYBOARD JSON:
+${JSON.stringify(baseStoryboard)}
+
+Upgrade goals:
+- Strengthen strategic clarity and visual specificity.
+- Increase contrast progression across frames.
+- Ensure each frame changes energy from the previous frame.
+- Remove vague language and generic placeholders.
+
+Hard constraints:
+- Keep the same JSON schema.
+- Keep frame count, frameNumber, and timing unchanged.
+- Keep concise production-usable language.
+- Return ONLY valid JSON, no markdown, no commentary.`;
+}
+
 export default async (req) => {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
@@ -451,19 +546,26 @@ export default async (req) => {
     const prompt = buildPrompt(script, constraints, projectName);
 
     let parsed;
-    let modelUsed;
+    let baseModelUsed;
     try {
-      const modelResult = await createStoryboardMessage(anthropic, prompt);
-      modelUsed = modelResult.model;
+      const modelResult = await createStoryboardMessage(anthropic, prompt, {
+        modelPlan: getStoryboardBaseModelPlan(),
+        primaryTimeoutMs: BASE_PRIMARY_TIMEOUT_MS,
+        rescueTimeoutMs: BASE_RESCUE_TIMEOUT_MS,
+        primaryMaxTokens: BASE_PRIMARY_MAX_TOKENS,
+        rescueMaxTokens: BASE_RESCUE_MAX_TOKENS,
+        temperature: 0.55
+      });
+      baseModelUsed = modelResult.model;
       parsed = extractJsonObject(modelResult.response?.content?.[0]?.text || '');
     } catch (error) {
-      if (error.message === TIMEOUT_ERROR) {
-        const storyboard = buildFallbackStoryboard(script, constraints);
+      if (error.message === TIMEOUT_ERROR || isRetryableModelError(error) || isModelNotFoundError(error)) {
+        const storyboard = buildFallbackStoryboard(script, constraints, projectName);
         return new Response(JSON.stringify({
           storyboard,
           fallback: true,
           partial: true,
-          fallbackReason: 'timeout'
+          fallbackReason: 'timeout_or_upstream'
         }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
@@ -472,12 +574,38 @@ export default async (req) => {
       throw error;
     }
 
-    const storyboard = normalizeStoryboard(parsed, script, constraints);
+    const baseStoryboard = normalizeStoryboard(parsed, script, constraints);
+    let storyboard = baseStoryboard;
+    let upgradeApplied = false;
+    let upgradeModelUsed = null;
+
+    try {
+      const upgradePrompt = buildUpgradePrompt(baseStoryboard, script, constraints, projectName);
+      const upgradeResult = await createStoryboardMessage(anthropic, upgradePrompt, {
+        modelPlan: getStoryboardUpgradeModelPlan(),
+        primaryTimeoutMs: UPGRADE_PRIMARY_TIMEOUT_MS,
+        rescueTimeoutMs: UPGRADE_RESCUE_TIMEOUT_MS,
+        primaryMaxTokens: UPGRADE_PRIMARY_MAX_TOKENS,
+        rescueMaxTokens: UPGRADE_RESCUE_MAX_TOKENS,
+        temperature: 0.45
+      });
+
+      const upgradedParsed = extractJsonObject(upgradeResult.response?.content?.[0]?.text || '');
+      storyboard = normalizeStoryboard(upgradedParsed, script, constraints);
+      upgradeApplied = true;
+      upgradeModelUsed = upgradeResult.model;
+    } catch (error) {
+      console.warn(`Storyboard upgrade skipped: ${error.message}`);
+    }
 
     return new Response(JSON.stringify({
       storyboard,
-      qualityPipeline: 'director-guardrails-v3',
-      modelUsed
+      qualityPipeline: 'director-guardrails-v4-two-pass',
+      modelUsed: {
+        base: baseModelUsed,
+        upgrade: upgradeModelUsed
+      },
+      upgradeApplied
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
