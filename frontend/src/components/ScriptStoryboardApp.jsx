@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-const SCRIPT_RETRY_ATTEMPTS = 2;
+const SCRIPT_RETRY_ATTEMPTS = 1;
 const SCRIPT_RETRY_DELAY_MS = 1200;
 const IMAGE_CONCURRENCY = 2;
 
@@ -83,7 +83,7 @@ export default function ScriptStoryboardApp() {
 
     try {
       const data = await callWithQualityRetry('/api/script-storyboard', { script }, (attempt, max) => {
-        setLoadingText(`Retrying for high-quality script alignment (${attempt}/${max})...`);
+        setLoadingText('Retrying for high-quality script alignment...');
       });
 
       setStoryboard(data.storyboard);

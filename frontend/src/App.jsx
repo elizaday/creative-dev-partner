@@ -5,7 +5,7 @@ import Variations from './components/Variations';
 import FinalConcepts from './components/FinalConcepts';
 import LoadingState from './components/LoadingState';
 
-const QUALITY_RETRY_ATTEMPTS = 2;
+const QUALITY_RETRY_ATTEMPTS = 1;
 const QUALITY_RETRY_DELAY_MS = 1200;
 
 function App() {
@@ -102,7 +102,7 @@ function App() {
         onRetry: (attempt, maxAttempts) => {
           setLoadingMessage({
             text: 'Retrying for high-quality ideas...',
-            subtext: `Attempt ${attempt} of ${maxAttempts}`
+            subtext: 'Trying one more quality pass'
           });
         }
       });
@@ -131,7 +131,7 @@ function App() {
         onRetry: (attempt, maxAttempts) => {
           setLoadingMessage({
             text: 'Retrying for high-quality variations...',
-            subtext: `Attempt ${attempt} of ${maxAttempts}`
+            subtext: 'Trying one more quality pass'
           });
         }
       });
@@ -158,7 +158,7 @@ function App() {
         onRetry: (attempt, maxAttempts) => {
           setLoadingMessage({
             text: 'Retrying for high-quality final concepts...',
-            subtext: `Attempt ${attempt} of ${maxAttempts}`
+            subtext: 'Trying one more quality pass'
           });
         }
       });
